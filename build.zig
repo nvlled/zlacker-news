@@ -33,30 +33,18 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    // This creates a module, which represents a collection of source files alongside
-    // some compilation options, such as optimization mode and linked system libraries.
-    // Zig modules are the preferred way of making Zig code available to consumers.
-    // addModule defines a module that we intend to make available for importing
-    // to our consumers. We must give it a name because a Zig package can expose
-    // multiple modules and consumers will need to be able to specify which
-    // module they want to access.
+    const gen_asset_exe = b.addExecutable(.{
+        .name = "generate_asset_list",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/generate-asset-list.zig"),
+            .target = target,
+        }),
+    });
+
     const mod = b.addModule("zlacker_news", .{
-        // The root source file is the "entry point" of this module. Users of
-        // this module will only be able to access public declarations contained
-        // in this file, which means that if you have declarations that you
-        // intend to expose to consumers that were defined in other files part
-        // of this module, you will have to make sure to re-export them from
-        // the root file.
         .root_source_file = b.path("src/root.zig"),
-        // Later on we'll use this module as the root module of a test executable
-        // which requires us to specify a target.
         .target = target,
         .imports = &.{
-            // Here "zlacker_news" is the name you will use in your source code to
-            // import this module (e.g. `@import("zlacker_news")`). The name is
-            // repeated because you are allowed to rename your imports, which
-            // can be extremely useful in case of collisions (which can happen
-            // importing modules from different packages).
             .{ .name = "zhtml", .module = zhtml.module("zhtml") },
             .{ .name = "httpz", .module = httpz.module("httpz") },
         },
@@ -109,22 +97,15 @@ pub fn build(b: *std.Build) void {
     // step). By default the install prefix is `zig-out/` but can be overridden
     // by passing `--prefix` or `-p`.
     b.installArtifact(exe);
+    //b.installArtifact(gen_asset_exe);
 
-    // This creates a top level step. Top level steps have a name and can be
-    // invoked by name when running `zig build` (e.g. `zig build run`).
-    // This will evaluate the `run` step rather than the default step.
-    // For a top level step to actually do something, it must depend on other
-    // steps (e.g. a Run step, as we will see in a moment).
     const run_step = b.step("run", "Run the app");
-
-    // This creates a RunArtifact step in the build graph. A RunArtifact step
-    // invokes an executable compiled by Zig. Steps will only be executed by the
-    // runner if invoked directly by the user (in the case of top level steps)
-    // or if another step depends on it, so it's up to you to define when and
-    // how this Run step will be executed. In our case we want to run it when
-    // the user runs `zig build run`, so we create a dependency link.
     const run_cmd = b.addRunArtifact(exe);
     run_step.dependOn(&run_cmd.step);
+
+    const run_step2 = b.step("gen-assetl", "Generate the asset list");
+    const run_cmd2 = b.addRunArtifact(gen_asset_exe);
+    run_step2.dependOn(&run_cmd2.step);
 
     // By making the run step depend on the default step, it will be run from the
     // installation directory rather than directly from within the cache directory.

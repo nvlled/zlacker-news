@@ -1,22 +1,25 @@
 const std = @import("std");
+const HN = @import("../hn.zig");
 const Zhtml = @import("zhtml");
 const Layout = @import("./layout.zig");
 const RequestContext = @import("../context.zig");
 
 pub const Data = struct {
-    x: u8,
+    items: []const HN.Item,
 };
 
 pub fn render(ctx: *RequestContext, data: Data) !void {
-    const arena = ctx.res.arena;
     const z = ctx.zhtml;
     const layout: Layout = .{ .ctx = ctx };
 
     try layout.begin_();
     {
-        try z.p.begin_();
-        try z.print(arena, "x = {d}", .{data.x});
-        try z.p.end();
+        for (data.items) |item| {
+            try z.div.begin_();
+            try z.h2.render_(item.title);
+            try z.br.render_();
+            try z.div.end();
+        }
     }
     try layout.end();
 }
