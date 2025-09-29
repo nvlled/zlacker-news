@@ -27,6 +27,9 @@ pub fn main() !void {
         \\
         \\
     );
+
+    var maxlen: usize = 0;
+
     try w.writeAll("pub const Names = enum {\n");
     {
         for (files) |filename| {
@@ -34,20 +37,14 @@ pub fn main() !void {
                 \\    @"{s}",
                 \\
             , .{filename});
+
+            maxlen = @max(maxlen, filename.len);
         }
     }
+
     try w.writeAll("};");
+
     try w.writeAll("\n\n");
-    try w.writeAll("pub const Data = .{\n");
-    {
-        for (files) |filename| {
-            try w.print(
-                \\    .@"{s}" = @embedFile("{s}"),
-                \\
-            , .{ filename, try std.fs.path.join(allocator, &.{ asset_dirname, filename }) });
-        }
-    }
-    try w.writeAll("};\n\n");
 
     try w.writeAll(
         \\pub fn getData(t: Names) []const u8 {
@@ -57,16 +54,19 @@ pub fn main() !void {
     {
         for (files) |filename| {
             try w.print(
-                \\        .@"{s}" => Data.@"{s}",
+                \\        .@"{s}" => @embedFile("{s}"),
                 \\
-            , .{ filename, filename });
+            , .{ filename, try std.fs.path.join(allocator, &.{ ".", filename }) });
         }
     }
     try w.writeAll(
         \\    };
         \\}
         \\
+        \\
     );
+
+    try w.print("pub const max_name_len = {d};\n", .{maxlen});
 
     try w.flush();
     const output = try buffer.toOwnedSlice();
@@ -87,7 +87,7 @@ fn getFileList(allocator: std.mem.Allocator) ![]const []const u8 {
 
     var iter = asset_dir.iterate();
     while (try iter.next()) |entry| {
-        const filename = try std.fs.path.join(allocator, &.{entry.name});
+        const filename = try std.fs.path.join(allocator, &.{ "/assets", entry.name });
         try result.append(allocator, filename);
     }
 
