@@ -7,7 +7,7 @@ const std = @import("std");
 // build runner to parallelize the build automatically (and the cache system to
 // know when a step doesn't need to be re-run).
 pub fn build(b: *std.Build) void {
-    //b.option(bool, "cache-fetch", "cache all HTTP requests to external API");
+    const test_filter = b.option([]const u8, "test", "run only test that matches filter");
 
     // Standard target options allow the person running `zig build` to choose
     // what target to build for. Here we do not override the defaults, which
@@ -122,6 +122,7 @@ pub fn build(b: *std.Build) void {
     // set the releative field.
     const mod_tests = b.addTest(.{
         .root_module = mod,
+        .filters = if (test_filter) |filter| &.{filter} else &.{},
     });
 
     // A run step that will run the test executable.
