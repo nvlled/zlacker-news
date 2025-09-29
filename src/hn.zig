@@ -22,7 +22,7 @@ pub const Item = struct {
     id: ItemID = 0,
     score: ItemID = 0,
     title: String = "",
-    url: String = "",
+    url: ?String = null,
     descendants: usize = 0,
     kids: []const ItemID = &.{},
     time: ItemID = 0,
@@ -40,8 +40,11 @@ pub const Item = struct {
         const title = try allocator.dupe(u8, self.title);
         errdefer allocator.free(title);
 
-        const url = try allocator.dupe(u8, self.url);
-        errdefer allocator.free(url);
+        const url: ?[]const u8 = if (self.url) |url|
+            try allocator.dupe(u8, url)
+        else
+            null;
+        errdefer if (url) |u| allocator.free(u);
 
         const kids = try allocator.dupe(ItemID, self.kids);
         errdefer allocator.free(kids);
@@ -73,11 +76,10 @@ pub const Item = struct {
     pub fn free(self: Item, allocator: Allocator) void {
         allocator.free(self.by);
         allocator.free(self.title);
-        allocator.free(self.url);
+        if (self.url) |url| allocator.free(url);
         allocator.free(self.kids);
         allocator.free(self.type);
         allocator.free(self.text);
-        //allocator.destroy(self);
     }
 };
 
@@ -229,6 +231,7 @@ const AlgoliaItem = struct {
     type: []const u8 = "",
     title: ?[]const u8 = null,
     text: ?[]const u8 = null,
+    url: ?[]const u8 = null,
 
     children: []const AlgoliaItem = &.{},
 };
@@ -264,7 +267,8 @@ pub fn fetchThreadAlgolia(self: *Self, allocator: Allocator, opID: ItemID) ![]It
         fn loop(gpa: Allocator, items: *std.ArrayList(Item), aitem: *const AlgoliaItem) !void {
             const item = try (Item{
                 .id = aitem.id,
-                .parent = aitem.parent_id orelse 0,
+                .url = aitem.url,
+                .parent = aitem.parent_id,
                 .score = aitem.points orelse 0,
                 .by = aitem.author,
                 .time = aitem.created_at_i,
