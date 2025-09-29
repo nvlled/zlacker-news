@@ -6,16 +6,21 @@ const Allocator = std.mem.Allocator;
 client: http.Client,
 thread_pool: *std.Thread.Pool,
 
-cache_duration_sec: u64 = if (builtin.mode == .Debug) 30 * 60 else 1 * 60,
-background_wg: std.Thread.WaitGroup = .{},
+cache: struct {
+    remover_task_active: bool = false,
+    expiration_sec: i128 = if (builtin.mode == .Debug) 8 * 60 * 60 else 1 * 60,
+    wg: std.Thread.WaitGroup = .{},
+} = .{},
 
 pub const Error = error{FetchError};
 
+pub const ItemID = u64;
+
 const Self = @This();
 
-const ItemID = u64;
-
 const String = []const u8;
+
+const sec_to_nano: i128 = 1e9;
 
 pub const Item = struct {
     by: String = "",
@@ -30,7 +35,7 @@ pub const Item = struct {
     text: String = "",
     deleted: bool = false,
     dead: bool = false,
-    parent: ItemID = 0,
+    parent: ?ItemID = null,
 
     // Caller must free Item.free() afterwards
     pub fn dupe(self: Item, allocator: Allocator) !Item {
@@ -105,7 +110,50 @@ pub fn deinit(self: *Self, allocator: Allocator) void {
 }
 
 pub fn waitBackgroundTasks(self: *Self) void {
-    self.thread_pool.waitAndWork(&self.background_wg);
+    self.thread_pool.waitAndWork(&self.cache.wg);
+}
+
+pub fn startStaleCacheRemover(self: *Self, allocator: Allocator) !void {
+    const task = struct {
+        fn _(alloc: Allocator, expiration: i138) void {
+            while (true) {
+                defer std.Thread.sleep(60 * 1 * sec_to_nano);
+                removeStaleCacheFiles(alloc, expiration) catch |err| {
+                    std.debug.print("an error occured while removing caches: {any}\n", .{err});
+                };
+            }
+        }
+    }._;
+
+    const thread = try std.Thread.spawn(.{}, task, .{
+        allocator,
+        self.cache.expiration_sec * sec_to_nano,
+    });
+    thread.detach();
+}
+
+const dirname = ".zlacker-cache";
+pub fn removeStaleCacheFiles(allocator: Allocator, expiration: i138) !void {
+    var dir = try std.fs.cwd().openDir(dirname, .{ .iterate = true });
+    defer dir.close();
+
+    var iter = dir.iterate();
+    while (try iter.next()) |entry| {
+        defer std.Thread.sleep(1 * sec_to_nano);
+
+        const filename = try std.fs.path.join(allocator, &.{ dirname, entry.name });
+        defer allocator.free(filename);
+
+        const stat = std.fs.cwd().statFile(filename) catch continue;
+        const elapsed = std.time.nanoTimestamp() - stat.mtime;
+        if (elapsed > expiration) {
+            std.fs.cwd().deleteFile(filename) catch |err| {
+                std.debug.print("failed to delete cache file : {any}\n", .{err});
+                continue;
+            };
+            std.debug.print("-> cache file deleted: {s}\n", .{filename});
+        }
+    }
 }
 
 // Caller must free returned string
@@ -126,17 +174,32 @@ pub fn fetch(self: *Self, arena: Allocator, url: []const u8) ![]const u8 {
 
 // Caller must free returned slice
 pub fn fetchTopStoryIDs(self: *Self, allocator: Allocator) ![]const ItemID {
+    if (try self.loadFeedCache(allocator, "topstories")) |ids| {
+        return ids;
+    }
+
     const json_str = try self.fetch(allocator, "https://hacker-news.firebaseio.com/v0/topstories.json");
     defer allocator.free(json_str);
 
     const parsed = try std.json.parseFromSlice([]const u64, allocator, json_str, .{});
     defer parsed.deinit();
 
-    return allocator.dupe(ItemID, parsed.value);
+    const ids = try allocator.dupe(ItemID, parsed.value);
+
+    cacheFeed(allocator, "topstories", ids) catch |err| {
+        std.debug.print("failed to cache feed {s} : {any}", .{ "topstories", err });
+        printStackTrace(@errorReturnTrace());
+    };
+
+    return ids;
 }
 
 // Caller must call Item.free() afterwards
 pub fn fetchItem(self: *Self, allocator: Allocator, id: ItemID) !Item {
+    if (try self.loadItemCache(allocator, id)) |item| {
+        return item;
+    }
+
     const url = try std.fmt.allocPrint(allocator, "https://hacker-news.firebaseio.com/v0/item/{d}.json", .{
         id,
     });
@@ -150,11 +213,18 @@ pub fn fetchItem(self: *Self, allocator: Allocator, id: ItemID) !Item {
     });
     defer parsed.deinit();
 
-    return parsed.value.dupe(allocator);
+    const item = try parsed.value.dupe(allocator);
+
+    cacheItem(allocator, item) catch |err| {
+        std.debug.print("failed to cache item: {any}", .{err});
+        printStackTrace(@errorReturnTrace());
+    };
+
+    return item;
 }
 
 // Caller must call Item.free() for each item and the free the slice itself
-pub fn fetchAllItems(self: *Self, allocator: Allocator, ids: []const ItemID) ![]Item {
+pub fn fetchAllItems(self: *Self, allocator: Allocator, ids: []const ItemID) ![]const Item {
     switch (ids.len) {
         0 => return allocator.dupe(Item, &.{}),
         1 => {
@@ -395,7 +465,7 @@ pub fn fetchThreadOfficial(self: *Self, allocator: Allocator, opID: ItemID) ![]I
 // Caller must call Item.free() for each item and the free the slice itself
 // Uses the Algolia API, then falls back to official HN API if it fails.
 pub fn fetchThread(self: *Self, allocator: Allocator, opID: ItemID) ![]const Item {
-    const cached_items = try loadThreadCache(allocator, opID);
+    const cached_items = try self.loadThreadCache(allocator, opID);
     if (cached_items) |ci| return ci;
 
     const items = blk: {
@@ -407,20 +477,47 @@ pub fn fetchThread(self: *Self, allocator: Allocator, opID: ItemID) ![]const Ite
         };
     };
 
-    self.thread_pool.spawnWg(&self.background_wg, cacheThread, .{ allocator, opID, items });
+    std.sort.block(Item, items, {}, compareItem);
+
+    {
+        const copy = try dupeItems(allocator, items);
+        self.thread_pool.spawn(struct {
+            fn _(gpa: Allocator, id: ItemID, items2: []const Item) void {
+                defer freeItems(gpa, items2);
+                cacheThread(gpa, id, items2) catch |err| {
+                    std.debug.print("failed to cache thread: {any}", .{err});
+                    printStackTrace(@errorReturnTrace());
+                };
+            }
+        }._, .{ allocator, opID, copy }) catch unreachable;
+    }
 
     return items;
 }
 
+fn compareItem(_: void, a: Item, b: Item) bool {
+    return a.id < b.id;
+}
+
 // Frees both slice and the individual items.
-fn freeItems(allocator: Allocator, items: []const Item) void {
+pub fn freeItems(allocator: Allocator, items: []const Item) void {
     for (items) |item| item.free(allocator);
     allocator.free(items);
 }
 
-//fn loadCache(allocator: Allocator, comptime T: type, filename: []const u8) !T {}
+fn dupeItems(allocator: Allocator, items: []const Item) ![]const Item {
+    const copy = try allocator.alloc(Item, items.len);
+    for (0..items.len) |i| {
+        copy[i] = try items[i].dupe(allocator);
+    }
+    return copy;
+}
 
-fn loadThreadCache(allocator: Allocator, opID: ItemID) !?[]const Item {
+fn loadThreadCache(
+    self: *Self,
+    allocator: Allocator,
+    opID: ItemID,
+) !?[]const Item {
     const basename = try std.fmt.allocPrint(allocator, "thread-{d}", .{opID});
     defer allocator.free(basename);
 
@@ -430,6 +527,46 @@ fn loadThreadCache(allocator: Allocator, opID: ItemID) !?[]const Item {
     });
     defer allocator.free(filename);
 
+    const ids = try self.loadCacheFile(allocator, []const ItemID, filename) orelse {
+        return null;
+    };
+    defer allocator.free(ids);
+
+    return try self.fetchAllItems(allocator, ids);
+}
+
+fn loadItemCache(self: *Self, allocator: Allocator, id: ItemID) !?Item {
+    const basename = try std.fmt.allocPrint(allocator, "item-{d}", .{id});
+    defer allocator.free(basename);
+
+    const filename = try std.fs.path.join(allocator, &.{
+        ".zlacker-cache",
+        basename,
+    });
+    defer allocator.free(filename);
+
+    return self.loadCacheFile(allocator, Item, filename);
+}
+
+fn loadFeedCache(self: *Self, allocator: Allocator, feed_name: []const u8) !?[]const ItemID {
+    const basename = try std.fmt.allocPrint(allocator, "feed-{s}", .{feed_name});
+    defer allocator.free(basename);
+
+    const filename = try std.fs.path.join(allocator, &.{
+        ".zlacker-cache",
+        basename,
+    });
+    defer allocator.free(filename);
+
+    return self.loadCacheFile(allocator, []const ItemID, filename);
+}
+
+fn loadCacheFile(
+    self: *Self,
+    allocator: Allocator,
+    T: type,
+    filename: []const u8,
+) !?T {
     const file = std.fs.cwd().openFile(filename, .{}) catch |err| {
         switch (err) {
             std.fs.File.OpenError.FileNotFound,
@@ -445,131 +582,113 @@ fn loadThreadCache(allocator: Allocator, opID: ItemID) !?[]const Item {
     var buffer: [1024]u8 = undefined;
     var reader = file.reader(&buffer);
 
-    const file_size = (try file.stat()).size;
+    const stat = try file.stat();
+    if ((std.time.nanoTimestamp() - stat.mtime) > self.cache.expiration_sec * sec_to_nano) {
+        return null;
+    }
+
+    const file_size = stat.size;
     const data = try allocator.alloc(u8, file_size + 1);
     defer allocator.free(data);
 
     data[data.len - 1] = 0;
     try reader.interface.readSliceAll(data[0..file_size]);
 
-    return try std.zon.parse.fromSlice([]const Item, allocator, data[0..file_size :0], null, .{
+    return std.zon.parse.fromSlice(T, allocator, data[0..file_size :0], null, .{
         .free_on_error = true,
-    });
+    }) catch null;
 }
 
-fn cacheItem(allocator: Allocator, item: Item) void {
-    @panic("TODO");
-}
+fn cacheFeed(allocator: Allocator, feed_name: []const u8, ids: []const ItemID) !void {
+    try std.fs.cwd().makePath(".zlacker-cache");
 
-fn loadItemCache(allocator: Allocator, id: ItemID) !?Item {
-    @panic("TODO");
-}
-
-// I could also cache the portions of rendered page,
-// at the the static ones
-
-fn cacheThread(allocator: Allocator, opID: ItemID, items: []Item) void {
-    std.fs.cwd().makePath(".zlacker-cache") catch |err| {
-        std.debug.print("failed to create cache dir: {any}\n", .{err});
-        return;
-    };
-
-    const basename = std.fmt.allocPrint(allocator, "thread-{d}", .{opID}) catch |err| {
-        std.debug.print("failed to allocate basename : {any}\n", .{err});
-        return;
-    };
+    const basename = try std.fmt.allocPrint(allocator, "feed-{s}", .{feed_name});
     defer allocator.free(basename);
 
-    const filename = std.fs.path.join(allocator, &.{
+    const filename = try std.fs.path.join(allocator, &.{
         ".zlacker-cache",
         basename,
-    }) catch |err| {
-        std.debug.print("failed to allocate filename : {any}\n", .{err});
-        return;
-    };
+    });
     defer allocator.free(filename);
 
-    const file = std.fs.cwd().createFile(filename, .{}) catch |err| {
-        std.debug.print("failed to open file: {s} : {any}\n", .{ filename, err });
-        return;
-    };
+    const file = try std.fs.cwd().createFile(filename, .{});
     defer file.close();
 
     var buffer: [1024]u8 = undefined;
     var writer = file.writer(&buffer);
     var w = &writer.interface;
 
-    std.zon.stringify.serialize(items, .{}, w) catch |err| {
-        std.debug.print("failed to serialize items : {any}\n", .{err});
-    };
-
-    w.flush() catch {};
+    try std.zon.stringify.serialize(ids, .{}, w);
+    return w.flush();
 }
 
-//test {
-//    var ts_allocator: std.heap.ThreadSafeAllocator = .{
-//        .child_allocator = std.testing.allocator,
-//    };
-//    const allocator = ts_allocator.allocator();
-//
-//    var hn: Self = try .init(allocator);
-//    defer hn.deinit(allocator);
-//
-//    const item = try hn.fetchItem(allocator, 45346387);
-//    defer item.free(allocator);
-//
-//    std.debug.print("> {s} by {s}\n", .{ item.title, item.by });
-//}
-//
-//test {
-//    var ts_allocator: std.heap.ThreadSafeAllocator = .{
-//        .child_allocator = std.testing.allocator,
-//    };
-//    const allocator = ts_allocator.allocator();
-//
-//    var hn: Self = try .init(allocator);
-//    defer hn.deinit(allocator);
-//
-//    const story_ids = try hn.fetchTopStoryIDs(allocator);
-//    defer allocator.free(story_ids);
-//
-//    const items: []Item = try hn.fetchAllItems(allocator, story_ids[0..10]);
-//    defer {
-//        for (items) |item| item.free(allocator);
-//        allocator.free(items);
-//    }
-//
-//    for (items) |item| {
-//        std.debug.print("> {s}\n", .{item.title});
-//    }
-//
-//    std.debug.print("item size: {d}\n", .{@sizeOf(Item)});
-//}
+fn cacheItem(allocator: Allocator, item: Item) !void {
+    try std.fs.cwd().makePath(".zlacker-cache");
 
-//test {
-//    var ts_allocator: std.heap.ThreadSafeAllocator = .{
-//        .child_allocator = std.testing.allocator,
-//    };
-//    const allocator = ts_allocator.allocator();
-//
-//    var hn: Self = try .init(allocator);
-//    defer hn.deinit(allocator);
-//
-//    const items = try hn.fetchThread(allocator, 45345950);
-//    defer {
-//        for (items) |item| item.free(allocator);
-//        allocator.free(items);
-//    }
-//
-//    for (items) |item| {
-//        std.debug.print("> {s} : {s}\n{s}\n--------\n", .{
-//            item.title,
-//            item.by,
-//            item.text,
-//        });
-//    }
-//    std.debug.print("total num items: {d}\n", .{items.len});
-//}
+    const basename = try std.fmt.allocPrint(allocator, "item-{d}", .{item.id});
+    defer allocator.free(basename);
+
+    const filename = try std.fs.path.join(allocator, &.{
+        ".zlacker-cache",
+        basename,
+    });
+    defer allocator.free(filename);
+
+    const file = try std.fs.cwd().createFile(filename, .{});
+    defer file.close();
+
+    var buffer: [1024]u8 = undefined;
+    var writer = file.writer(&buffer);
+    var w = &writer.interface;
+
+    try std.zon.stringify.serialize(item, .{}, w);
+    return w.flush();
+}
+
+fn cacheThread(allocator: Allocator, opID: ItemID, items: []const Item) !void {
+    try std.fs.cwd().makePath(".zlacker-cache");
+
+    const basename = try std.fmt.allocPrint(allocator, "thread-{d}", .{opID});
+    defer allocator.free(basename);
+
+    const filename = try std.fs.path.join(allocator, &.{
+        ".zlacker-cache",
+        basename,
+    });
+    defer allocator.free(filename);
+
+    var ids: std.ArrayList(ItemID) = try .initCapacity(allocator, items.len);
+    defer ids.deinit(allocator);
+
+    for (items) |item| {
+        ids.appendAssumeCapacity(item.id);
+        cacheItem(allocator, item) catch |err| {
+            std.debug.print("failed to cache thread item: {any}\n", .{err});
+        };
+    }
+
+    const file = try std.fs.cwd().createFile(filename, .{});
+    defer file.close();
+
+    var buffer: [1024]u8 = undefined;
+    var writer = file.writer(&buffer);
+    var w = &writer.interface;
+
+    try std.zon.stringify.serialize(ids.items, .{}, w);
+    return w.flush();
+}
+
+fn printStackTrace(trace_arg: ?*std.builtin.StackTrace) void {
+    const trace = trace_arg orelse return;
+    var stdout = std.fs.File.stdout().writer(&.{});
+    const debug_info = std.debug.getSelfDebugInfo() catch return;
+    std.debug.writeStackTrace(
+        trace.*,
+        &stdout.interface,
+        debug_info,
+        .no_color,
+    ) catch {};
+}
 
 test {
     var ts_allocator: std.heap.ThreadSafeAllocator = .{
@@ -580,7 +699,58 @@ test {
     var hn: Self = try .init(allocator);
     defer hn.deinit(allocator);
 
-    const items = try hn.fetchThread(allocator, 45366867);
+    const item = try hn.fetchItem(allocator, 314693);
+    defer item.free(allocator);
+
+    const t = std.testing;
+    try t.expectEqualStrings("Reading source code: The rise of F#", item.title);
+    try t.expectEqualStrings("bdfh42", item.by);
+    try t.expectEqual(314693, item.id);
+    try t.expectEqual(1222333484, item.time);
+
+    hn.waitBackgroundTasks();
+}
+
+test {
+    var ts_allocator: std.heap.ThreadSafeAllocator = .{
+        .child_allocator = std.testing.allocator,
+    };
+    const allocator = ts_allocator.allocator();
+
+    var hn: Self = try .init(allocator);
+    defer hn.deinit(allocator);
+
+    const story_ids = try hn.fetchTopStoryIDs(allocator);
+    defer allocator.free(story_ids);
+
+    const items: []const Item = try hn.fetchAllItems(allocator, story_ids[0..1]);
+    defer {
+        for (items) |item| item.free(allocator);
+        allocator.free(items);
+    }
+
+    const t = std.testing;
+    try t.expectEqual(1, items.len);
+    try t.expect(items[0].title.len > 0);
+    try t.expect(items[0].by.len > 0);
+    try t.expect(items[0].id > 0);
+    try t.expect(items[0].time > 0);
+
+    hn.waitBackgroundTasks();
+}
+
+test fetchThread {
+    var ts_allocator: std.heap.ThreadSafeAllocator = .{
+        .child_allocator = std.testing.allocator,
+    };
+    const allocator = ts_allocator.allocator();
+
+    var hn: Self = try .init(allocator);
+    defer hn.deinit(allocator);
+
+    try hn.startStaleCacheRemover(allocator);
+
+    const items = try hn.fetchThread(allocator, 1727731);
     defer freeItems(allocator, items);
 
     var count: usize = 0;
