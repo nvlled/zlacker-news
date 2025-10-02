@@ -1,26 +1,48 @@
 const std = @import("std");
 const Zhtml = @import("zhtml");
 const RequestContext = @import("../context.zig");
+const Assets = @import("../assets.zig");
 
 ctx: *RequestContext,
 
-pub fn begin_(self: @This()) !void {
-    const z = self.ctx.zhtml;
-    try z.html.begin_();
-    try z.head.begin_();
-    {
-        try z.title.render_("zlacker");
-        try z.meta.render(.{ .charset = "utf-8" });
-    }
-    try z.head.end();
-    try z.body.begin_();
+pub const Attrs = struct {
+    title: ?[]const u8 = null,
+};
 
-    try z.h1.render_("zlacker");
-    try z.hr.render_();
+pub fn begin(self: @This(), attrs: Attrs) void {
+    const z = self.ctx.zhtml;
+
+    z.@"writeUnsafe!?"("<!DOCTYPE html>");
+    z.html.@"<>"();
+    z.head.@"<>"();
+    {
+        z.title.@"<>"();
+        z.write("zlacker");
+        if (attrs.title) |title| if (title.len > 0) {
+            z.write(" - ");
+            z.write(title);
+        };
+        z.title.@"</>"();
+
+        z.meta.attr(.charset, "utf-8");
+        z.meta.render();
+
+        z.link.attr(.rel, "stylesheet");
+        z.link.attr(.href, Assets.link(.@"/assets/style.css"));
+        z.link.render();
+    }
+    z.head.@"</>"();
+    z.body.@"<>"();
+
+    z.h1.@"<>"();
+    z.a.attr(.href, "/");
+    z.a.render("zlacker");
+    z.h1.@"</>"();
+    z.hr.@"<>"();
 }
 
-pub fn end(self: @This()) !void {
+pub fn end(self: @This()) void {
     const z = self.ctx.zhtml;
-    try z.body.end();
-    try z.html.end();
+    z.body.@"</>"();
+    z.html.@"</>"();
 }

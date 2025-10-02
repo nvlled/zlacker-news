@@ -1,4 +1,76 @@
 
 body {
-	color: red;
+	max-width: 800px;
+	background: #122;
+	color: #eee;
+}
+
+h1 > a,
+h2 > a,
+h3 > a,
+h4 > a
+{
+	text-decoration: none;
+	color: #077;
+}
+
+ a {
+	color: #077;
+}
+
+
+a.replink {
+	color: #067;
+	&.op { color: #a60; }
+	&.resp {
+		margin-right: 15px;
+	}
+}
+
+.item {
+	.header {
+		font-weight: 700;
+		margin-top: 20px;
+		margin-bottom: 5px;
+
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+	}
+
+	.margin {
+		margin-right: 2px;
+		display: inline-block;
+		height: 12px;
+		width: 0px;
+		background: linear-gradient(
+			to right,
+			#222,
+			#acc
+		);
+	}
+
+	.depth-2 { width: 5px; }
+	.depth-3 { width: 10px; }
+	.depth-4 { width: 15px; }
+	.depth-5 { width: 20px; }
+	.depth-6 { width: 25px; }
+	.depth-7 { width: 30px; }
+	.depth-8 { width: 35px; }
+	.depth-9 { width: 40px; }
+	.depth-10 { width: 45px; }
+	.depth-11 { width: 50px; }
+	.depth-12 { width: 55px; }
+	.depth-13 { width: 60px; }
+	.depth-14 { width: 65px; }
+	.depth-15 { width: 70px; }
+}
+
+
+
+
+#feed-page {
+	a.item-link {
+
+	}
 }

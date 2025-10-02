@@ -1,7 +1,7 @@
 const std = @import("std");
 const httpz = @import("httpz");
 
-const assets = @import("./assets.zig");
+const Assets = @import("./assets.zig");
 const Ext2mime = @import("./ext2mime.zig");
 const HN = @import("./hn.zig");
 const Zhtml = @import("zhtml");
@@ -9,54 +9,48 @@ const RequestContext = @import("./context.zig");
 
 const Action = *const fn (*RequestContext) anyerror!void;
 
-const PageEntry = struct {
-    path: []const u8,
-    action: Action,
-};
-
-const pages: []const PageEntry = &.{
-    .{
-        .path = "/",
-        .action = handleIndex,
-    },
-};
-
-const App = struct {
+const Handler = struct {
     allocator: std.mem.Allocator,
-
-    pub fn dispatch(app: *const App, action: Action, req: *httpz.Request, res: *httpz.Response) !void {
-        var zhtml: Zhtml = if (@import("builtin").mode == .Debug)
-            try .initDebug(res.writer(), res.arena)
-        else
-            .init(res.writer());
-
-        // I should probably wrap the top-level allocator with ThreadSafeAllocator?
-        var hn: HN = try .init(app.allocator);
+    hn: *HN,
+    pub fn dispatch(app: *const Handler, action: Action, req: *httpz.Request, res: *httpz.Response) !void {
+        var zhtml: Zhtml = try .init(res.writer(), res.arena);
+        defer {
+            std.debug.print("{s}\n", .{zhtml.getErrorTrace() orelse ""});
+            zhtml.deinit(res.arena);
+        }
 
         var ctx = RequestContext{
-            .hn = &hn,
+            .hn = app.hn,
             .zhtml = &zhtml,
             .req = req,
             .res = res,
             .allocator = app.allocator,
         };
 
-        return action(&ctx) catch |err| {
-            if (@errorReturnTrace()) |trace| {
-                var w = res.writer();
-                try w.writeAll("<br><pre style='color: red; background: #222'><h1>Error</h1>");
-                try std.debug.writeStackTrace(trace.*, w, try std.debug.getSelfDebugInfo(), .no_color);
-                try w.writeAll("<pre>");
+        std.debug.print("[request] {s}\n", .{req.url.raw});
 
-                var stdout = std.fs.File.stdout().writer(&.{});
-                w = &stdout.interface;
-                try std.debug.writeStackTrace(trace.*, w, try std.debug.getSelfDebugInfo(), .escape_codes);
+        return action(&ctx) catch |err| {
+            ctx.res.status = 500;
+            ctx.res.header("Content-Type", "text/html");
+            if (@import("builtin").mode == .Debug) {
+                if (@errorReturnTrace()) |trace| {
+                    var w = res.writer();
+                    try w.writeAll("<br><pre style='color: red; background: #222'><h1>Error</h1>");
+                    try std.debug.writeStackTrace(trace.*, w, try std.debug.getSelfDebugInfo(), .no_color);
+                    try w.writeAll("<pre>");
+
+                    var stdout = std.fs.File.stdout().writer(&.{});
+                    w = &stdout.interface;
+                    try std.debug.writeStackTrace(trace.*, w, try std.debug.getSelfDebugInfo(), .escape_codes);
+                }
+                return err;
+            } else {
+                res.body = "a disturbance in the air, something went wrong";
             }
-            return err;
         };
     }
 
-    pub fn uncaughtError(_: *App, req: *httpz.Request, res: *httpz.Response, err: anyerror) void {
+    pub fn uncaughtError(_: *Handler, req: *httpz.Request, res: *httpz.Response, err: anyerror) void {
         std.log.info("500 {} {s} {}", .{ req.method, req.url.path, err });
         res.status = 500;
         res.body = "nope";
@@ -64,11 +58,30 @@ const App = struct {
 };
 
 pub fn startServer() !void {
+    //     var dba: std.heap.DebugAllocator(.{}) = .init;
+    //     var tsa: std.heap.ThreadSafeAllocator = .{
+    //         .child_allocator = if (@import("builtin").mode == .Debug)
+    //             dba.allocator()
+    //         else
+    //             std.heap.smp_allocator,
+    //     };
+    //     const allocator = tsa.allocator();
     const allocator = std.heap.smp_allocator;
 
+    var hn: HN = try .init(allocator);
+    defer hn.deinit(allocator);
+
+    try hn.startStaleCacheRemover(allocator);
+
     const port = 8000;
-    var server = try httpz.Server(App).init(allocator, .{ .port = port }, .{
+    var server = try httpz.Server(Handler).init(allocator, .{
+        .port = port,
+        .timeout = .{
+            .request = 1000,
+        },
+    }, .{
         .allocator = allocator,
+        .hn = &hn,
     });
     defer {
         server.stop();
@@ -76,86 +89,154 @@ pub fn startServer() !void {
     }
 
     var router = try server.router(.{});
-    for (pages) |page| {
-        router.get(page.path, page.action, .{});
-    }
 
-    router.get("/", handleIndex, .{});
-    router.get("/assets/*", handleAsset, .{});
+    router.get("/", Controllers.index, .{});
+    router.get("/item", Controllers.item, .{});
+    router.get("/assets/*", Controllers.assets, .{});
 
     std.debug.print("server running at localhost:{d}\n", .{port});
     try server.listen();
+
+    unreachable;
 }
 
-fn handleAsset(ctx: *RequestContext) !void {
-    const basename = "/assets/";
-    const filename = ctx.req.url.path[basename.len..];
-    std.debug.print("serving asset: {s}\n", .{filename});
+const Controllers = struct {
+    fn assets(ctx: *RequestContext) !void {
+        const filename = ctx.req.url.path[0..Assets.max_name_len];
 
-    const t: assets.Names = std.meta.stringToEnum(assets.Names, filename) orelse {
-        return error.AssetNotFound;
-    };
+        const t: Assets.Names = std.meta.stringToEnum(Assets.Names, filename) orelse {
+            ctx.res.status = 404;
+            return error.AssetNotFound;
+        };
 
-    const data = assets.getData(t);
-    const file_ext = std.fs.path.extension(filename);
+        const data = Assets.getData(t);
+        const file_ext = std.fs.path.extension(filename);
 
-    if (Ext2mime.get(file_ext)) |mime_type| {
-        ctx.res.header("Content-Type", mime_type);
+        if (Ext2mime.get(file_ext)) |mime_type| {
+            ctx.res.header("Content-Type", mime_type);
+        }
+
+        ctx.res.body = data;
     }
 
-    ctx.res.body = data;
-}
+    fn index(ctx: *RequestContext) !void {
+        const query = try ctx.req.query();
+        const page_num = if (query.get("page")) |p| std.fmt.parseInt(u8, p, 10) catch 0 else 0;
+        const allocator = ctx.allocator;
 
-fn handleIndex(ctx: *RequestContext) !void {
-    const query = try ctx.req.query();
-    const page_num = if (query.get("page")) |p| std.fmt.parseInt(u8, p, 10) catch 0 else 0;
+        const all_ids = try ctx.hn.fetchTopStoryIDs(allocator);
+        defer allocator.free(all_ids);
 
-    const allocator = ctx.allocator;
+        const page_size: usize = 30;
+        const i = page_num * page_size;
+        const selected_ids = all_ids[i..@min(i + page_size, all_ids.len)];
 
-    const all_ids = try ctx.hn.fetchTopStoryIDs(allocator);
-    defer allocator.free(all_ids);
+        const items = try ctx.hn.fetchAllItems(allocator, selected_ids);
+        defer HN.freeItems(allocator, items);
 
-    const page_size: usize = 30;
-    const index = page_num * page_size;
-    const selected_ids = all_ids[index..@min(index + page_size, all_ids.len)];
-    const items = try ctx.hn.fetchAllItems(allocator, selected_ids);
-    defer HN.freeItems(allocator, items);
+        ctx.res.header("Content-Type", "text/html");
+        try @import("./pages/index.zig").render(ctx, .{
+            .items = items,
+            .page_num = page_num,
+            .page_size = page_size,
+        });
+    }
 
-    // while fetching the comments I could start rendering the the
-    // page too, then once I need data, I just join the thread pool
-    // maybe that's not a good idea though
-    // since it could show a half-broke page state in a long while
-    // nothing a loading spinny indicator though
-    ctx.res.header("Content-Type", "text/html");
-    try @import("./pages/index.zig").render(ctx, .{ .items = items });
-}
+    fn item(ctx: *RequestContext) !void {
+        const allocator = ctx.allocator;
+        const query = try ctx.req.query();
+        const id = if (query.get("id")) |p| std.fmt.parseInt(HN.ItemID, p, 10) catch {
+            return error.InvalidID;
+        } else {
+            return error.@"Need an ID";
+        };
+
+        const items = try ctx.hn.fetchThread(allocator, id);
+        defer HN.freeItems(allocator, items);
+
+        var lookup: std.AutoHashMapUnmanaged(HN.ItemID, HN.Item) = .{};
+        try HN.fillItems(ctx.res.arena, @constCast(items), &lookup);
+
+        ctx.res.header("Content-Type", "text/html");
+        try @import("./pages/item.zig").render(ctx, .{ .items = items, .item_lookup = &lookup });
+    }
+};
 
 test {
-    std.testing.refAllDecls(HN);
-}
+    const allocator = std.testing.allocator;
 
-//test {
-//    const allocator = std.testing.allocator;
-//
-//    var wt = httpz.testing.init(.{});
-//    defer wt.deinit();
-//
-//    var hn: HN = try .init(allocator);
-//    defer hn.deinit(allocator);
-//
-//    var zhtml: Zhtml = try .initDebug(wt.res.writer(), allocator);
-//    defer zhtml.deinit(allocator);
-//
-//    for (pages) |page| {
-//        var ctx: RequestContext = .{
-//            .hn = &hn,
-//            .zhtml = &zhtml,
-//            .req = wt.req,
-//            .res = wt.res,
-//            .allocator = allocator,
-//        };
-//        try page.action(&ctx);
-//        try wt.expectStatus(200);
-//        std.debug.print("output for \"{s}\":\n{s}\n\n", .{ page.path, try wt.getBody() });
-//    }
-//}
+    {
+        var wt = httpz.testing.init(.{});
+        defer wt.deinit();
+
+        var hn: HN = try .init(allocator);
+        defer hn.deinit(allocator);
+
+        var zhtml: Zhtml = try .init(wt.res.writer(), allocator);
+        defer zhtml.deinit(allocator);
+
+        var ctx: RequestContext = .{
+            .hn = &hn,
+            .zhtml = &zhtml,
+            .req = wt.req,
+            .res = wt.res,
+            .allocator = allocator,
+        };
+        try Controllers.index(&ctx);
+        try wt.expectStatus(200);
+        std.debug.print("test output for \"{s}\":\n{s}\n\n", .{ "/", try wt.getBody() });
+    }
+
+    {
+        var wt = httpz.testing.init(.{});
+        defer wt.deinit();
+
+        var hn: HN = try .init(allocator);
+        defer hn.deinit(allocator);
+
+        var zhtml: Zhtml = try .init(wt.res.writer(), allocator);
+        defer zhtml.deinit(allocator);
+
+        var ctx: RequestContext = .{
+            .hn = &hn,
+            .zhtml = &zhtml,
+            .req = wt.req,
+            .res = wt.res,
+            .allocator = allocator,
+        };
+
+        const q = try wt.req.query();
+        q.add("id", "1727731");
+        try Controllers.item(&ctx);
+        try wt.expectStatus(200);
+        std.debug.print("test output for \"{s}\":\n{s}\n\n", .{ "/item", try wt.getBody() });
+    }
+
+    {
+        var wt = httpz.testing.init(.{});
+        defer wt.deinit();
+
+        var hn: HN = try .init(allocator);
+        defer hn.deinit(allocator);
+
+        var zhtml: Zhtml = try .init(wt.res.writer(), allocator);
+        defer zhtml.deinit(allocator);
+
+        var ctx: RequestContext = .{
+            .hn = &hn,
+            .zhtml = &zhtml,
+            .req = wt.req,
+            .res = wt.res,
+            .allocator = allocator,
+        };
+
+        ctx.req.url = .parse("/assets/script.js");
+
+        try Controllers.assets(&ctx);
+        try wt.expectStatus(200);
+        std.debug.print("test output for \"{s}\":\n{s}\n\n", .{
+            "/assets/script.js",
+            try wt.getBody(),
+        });
+    }
+}

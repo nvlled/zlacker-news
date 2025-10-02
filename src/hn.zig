@@ -12,17 +12,20 @@ cache: struct {
     wg: std.Thread.WaitGroup = .{},
 } = .{},
 
-pub const Error = error{FetchError};
+pub const Error = error{ FetchError, InvalidCacheFile };
 
 pub const ItemID = u64;
 
-const Self = @This();
+pub const ReplyMap = std.AutoHashMap(ItemID, *std.ArrayList(ItemID));
 
+const Self = @This();
 const String = []const u8;
 
 const sec_to_nano: i128 = 1e9;
 
 pub const Item = struct {
+    // NOTE: make sure all fields have default values,
+    // otherwise the zon parser will throw a fit when parsing
     by: String = "",
     id: ItemID = 0,
     score: ItemID = 0,
@@ -36,6 +39,10 @@ pub const Item = struct {
     deleted: bool = false,
     dead: bool = false,
     parent: ?ItemID = null,
+    sibling_num: ItemID = 0,
+    thread_id: ?ItemID = null,
+
+    depth: u8 = 0,
 
     // Caller must free Item.free() afterwards
     pub fn dupe(self: Item, allocator: Allocator) !Item {
@@ -75,6 +82,9 @@ pub const Item = struct {
             .text = text,
             .dead = self.dead,
             .parent = self.parent,
+
+            .sibling_num = self.sibling_num,
+            .thread_id = self.thread_id,
         };
     }
 
@@ -134,6 +144,7 @@ pub fn startStaleCacheRemover(self: *Self, allocator: Allocator) !void {
 
 const dirname = ".zlacker-cache";
 pub fn removeStaleCacheFiles(allocator: Allocator, expiration: i138) !void {
+    std.log.debug("removing stale cache files", .{});
     var dir = try std.fs.cwd().openDir(dirname, .{ .iterate = true });
     defer dir.close();
 
@@ -148,16 +159,29 @@ pub fn removeStaleCacheFiles(allocator: Allocator, expiration: i138) !void {
         const elapsed = std.time.nanoTimestamp() - stat.mtime;
         if (elapsed > expiration) {
             std.fs.cwd().deleteFile(filename) catch |err| {
-                std.debug.print("failed to delete cache file : {any}\n", .{err});
+                std.log.debug("failed to delete cache file : {any}\n", .{err});
                 continue;
             };
-            std.debug.print("-> cache file deleted: {s}\n", .{filename});
+            std.log.debug("-> cache file deleted: {s}\n", .{filename});
         }
     }
 }
 
 // Caller must free returned string
 pub fn fetch(self: *Self, arena: Allocator, url: []const u8) ![]const u8 {
+    // TODO: okay, I thought it's was a deadlock on a
+    // mutex that's causing it to hang,
+    // but it seems to happen here.
+    // Maybe a bug in the zig http client,
+    // I could probably add a timeout.
+    // Well actually it's also possible to be blocking
+    // on allocation which is protected by a mutex.
+    // It seems to happen though when I leave the
+    // program running after a while.
+    // Maybe it's the connection pool too?
+
+    std.log.debug("fetching url {s}", .{url});
+    defer std.log.debug("fetched url {s}", .{url});
     var buf: std.Io.Writer.Allocating = .init(arena);
     defer buf.deinit();
 
@@ -165,6 +189,7 @@ pub fn fetch(self: *Self, arena: Allocator, url: []const u8) ![]const u8 {
         .method = .GET,
         .location = .{ .url = url },
         .response_writer = &buf.writer,
+        .keep_alive = false,
     });
 
     if (result.status != .ok) return Error.FetchError;
@@ -214,6 +239,12 @@ pub fn fetchItem(self: *Self, allocator: Allocator, id: ItemID) !Item {
     defer parsed.deinit();
 
     const item = try parsed.value.dupe(allocator);
+
+    std.sort.block(ItemID, @constCast(item.kids), {}, struct {
+        fn _(_: void, a: ItemID, b: ItemID) bool {
+            return a < b;
+        }
+    }._);
 
     cacheItem(allocator, item) catch |err| {
         std.debug.print("failed to cache item: {any}", .{err});
@@ -302,6 +333,9 @@ const AlgoliaItem = struct {
     title: ?[]const u8 = null,
     text: ?[]const u8 = null,
     url: ?[]const u8 = null,
+    story_id: ?ItemID = null,
+
+    sibling_num: usize = 0,
 
     children: []const AlgoliaItem = &.{},
 };
@@ -310,6 +344,9 @@ const AlgoliaItem = struct {
 /// Uses the official Algolia API. This should be preferred since it only
 /// makes one HTTP request.
 pub fn fetchThreadAlgolia(self: *Self, allocator: Allocator, opID: ItemID) ![]Item {
+    std.log.debug("fetching thread {d} from algolia", .{opID});
+    errdefer std.log.debug("failed to fetch thread {d} from algolia", .{opID});
+
     const url = try std.fmt.allocPrint(
         allocator,
         "https://hn.algolia.com/api/v1/items/{d}",
@@ -320,10 +357,12 @@ pub fn fetchThreadAlgolia(self: *Self, allocator: Allocator, opID: ItemID) ![]It
     const json_str = try self.fetch(allocator, url);
     defer allocator.free(json_str);
 
+    std.log.debug("parsing thread {d} response from algolia", .{opID});
     const parsed = try std.json.parseFromSlice(AlgoliaItem, allocator, json_str, .{
         .ignore_unknown_fields = true,
     });
     defer parsed.deinit();
+    std.log.debug("parsed thread {d} response from algolia:\n{s}...\n", .{ opID, json_str[0..32] });
 
     const countItems = struct {
         fn loop(aitem: *const AlgoliaItem) usize {
@@ -334,8 +373,16 @@ pub fn fetchThreadAlgolia(self: *Self, allocator: Allocator, opID: ItemID) ![]It
     }.loop;
 
     const collect = struct {
-        fn loop(gpa: Allocator, items: *std.ArrayList(Item), aitem: *const AlgoliaItem) !void {
-            const item = try (Item{
+        fn loop(
+            gpa: Allocator,
+            thread_id: ItemID,
+            items: *std.ArrayList(Item),
+            aitem: *const AlgoliaItem,
+        ) !void {
+            var kids = try gpa.alloc(ItemID, aitem.children.len);
+            errdefer gpa.free(kids);
+
+            var item = try (Item{
                 .id = aitem.id,
                 .url = aitem.url,
                 .parent = aitem.parent_id,
@@ -345,15 +392,22 @@ pub fn fetchThreadAlgolia(self: *Self, allocator: Allocator, opID: ItemID) ![]It
                 .type = aitem.type,
                 .title = aitem.title orelse "",
                 .text = aitem.text orelse "",
-                .kids = &.{},
+                .kids = kids,
+                .sibling_num = aitem.sibling_num,
+                .thread_id = aitem.story_id,
             }).dupe(gpa);
             errdefer item.free(gpa);
 
-            items.appendAssumeCapacity(item);
+            for (aitem.children, 0..) |child, i| {
+                kids[i] = child.id;
 
-            for (aitem.children) |child| {
-                try loop(gpa, items, &child);
+                var sub_item = @constCast(&child);
+                sub_item.sibling_num = i;
+                try loop(gpa, thread_id, items, sub_item);
             }
+            item.kids = kids;
+
+            items.appendAssumeCapacity(item);
         }
     }.loop;
 
@@ -363,7 +417,8 @@ pub fn fetchThreadAlgolia(self: *Self, allocator: Allocator, opID: ItemID) ![]It
     defer result.deinit(allocator);
     errdefer for (result.items) |item| item.free(allocator);
 
-    try collect(allocator, &result, &parsed.value);
+    try collect(allocator, opID, &result, &parsed.value);
+    std.log.debug("fetched thread {d} from algolia : got {d} items ", .{ opID, result.items.len });
 
     return result.toOwnedSlice(allocator);
 }
@@ -373,6 +428,7 @@ pub fn fetchThreadAlgolia(self: *Self, allocator: Allocator, opID: ItemID) ![]It
 /// to fetchThreadAlgolia() since this once makes recursive HTTP requests
 /// for each item.
 pub fn fetchThreadOfficial(self: *Self, allocator: Allocator, opID: ItemID) ![]Item {
+    std.log.debug("fetching thread {d} from HN official API", .{opID});
     var result: std.ArrayList(Item) = .{};
     defer result.deinit(allocator);
     errdefer {
@@ -381,16 +437,24 @@ pub fn fetchThreadOfficial(self: *Self, allocator: Allocator, opID: ItemID) ![]I
         }
     }
 
-    var queue: std.ArrayList(ItemID) = .{};
+    const QueueEntry = struct {
+        id: ItemID,
+        sibling_num: usize,
+    };
+    var queue: std.ArrayList(QueueEntry) = .{};
     defer queue.deinit(allocator);
 
-    try queue.append(allocator, opID);
+    try queue.append(allocator, .{
+        .id = opID,
+        .sibling_num = 0,
+    });
 
     const SpawnContext = struct {
-        id: ItemID,
+        thread_id: usize,
+        entry: QueueEntry,
         allocator: Allocator,
         items: *std.ArrayList(Item),
-        queue: *std.ArrayList(ItemID),
+        queue: *std.ArrayList(QueueEntry),
         hn: *Self,
         err: *?anyerror,
         queue_mu: *std.Thread.Mutex,
@@ -406,7 +470,7 @@ pub fn fetchThreadOfficial(self: *Self, allocator: Allocator, opID: ItemID) ![]I
         if (spawn_err != null)
             break;
 
-        const id = blk: {
+        const entry = blk: {
             queue_mu.lock();
             defer queue_mu.unlock();
             break :blk queue.pop();
@@ -414,7 +478,8 @@ pub fn fetchThreadOfficial(self: *Self, allocator: Allocator, opID: ItemID) ![]I
 
         const spawn_ctx = try allocator.create(SpawnContext);
         spawn_ctx.* = SpawnContext{
-            .id = id,
+            .thread_id = opID,
+            .entry = entry,
             .allocator = allocator,
             .items = &result,
             .queue = &queue,
@@ -426,12 +491,18 @@ pub fn fetchThreadOfficial(self: *Self, allocator: Allocator, opID: ItemID) ![]I
 
         self.thread_pool.spawnWg(&wg, struct {
             fn _(ctx: *SpawnContext) void {
+                const id = ctx.entry.id;
+                const sibling_num = ctx.entry.sibling_num;
+
                 defer ctx.allocator.destroy(ctx);
 
-                const item = ctx.hn.fetchItem(ctx.allocator, ctx.id) catch |err| {
+                var item = ctx.hn.fetchItem(ctx.allocator, id) catch |err| {
                     ctx.err.* = err;
                     return;
                 };
+
+                item.sibling_num = sibling_num;
+                item.thread_id = ctx.thread_id;
 
                 ctx.items_mu.lock();
                 ctx.items.append(ctx.allocator, item) catch |err| {
@@ -444,8 +515,12 @@ pub fn fetchThreadOfficial(self: *Self, allocator: Allocator, opID: ItemID) ![]I
 
                 ctx.queue_mu.lock();
                 defer ctx.queue_mu.unlock();
-                for (item.kids) |kid| {
-                    ctx.queue.append(ctx.allocator, kid) catch |err| {
+                for (item.kids, 0..) |kid, i| {
+                    const next: QueueEntry = .{
+                        .id = kid,
+                        .sibling_num = i,
+                    };
+                    ctx.queue.append(ctx.allocator, next) catch |err| {
                         ctx.err.* = err;
                         return;
                     };
@@ -465,8 +540,14 @@ pub fn fetchThreadOfficial(self: *Self, allocator: Allocator, opID: ItemID) ![]I
 // Caller must call Item.free() for each item and the free the slice itself
 // Uses the Algolia API, then falls back to official HN API if it fails.
 pub fn fetchThread(self: *Self, allocator: Allocator, opID: ItemID) ![]const Item {
+    std.log.debug("fetching thread {d}", .{opID});
+    errdefer std.log.debug("failed to fetch thread {d}", .{opID});
+
     const cached_items = try self.loadThreadCache(allocator, opID);
-    if (cached_items) |ci| return ci;
+    if (cached_items) |ci| {
+        std.log.debug("fetched cached thread {d}: found {d} items", .{ opID, ci.len });
+        return ci;
+    }
 
     const items = blk: {
         break :blk self.fetchThreadAlgolia(allocator, opID) catch |err| {
@@ -477,15 +558,19 @@ pub fn fetchThread(self: *Self, allocator: Allocator, opID: ItemID) ![]const Ite
         };
     };
 
+    std.log.debug("fetched thread {d}: got {d} items", .{ opID, items.len });
+
     std.sort.block(Item, items, {}, compareItem);
 
     {
         const copy = try dupeItems(allocator, items);
+        std.log.debug("spawning thread for cacheThread({d})", .{opID});
         self.thread_pool.spawn(struct {
             fn _(gpa: Allocator, id: ItemID, items2: []const Item) void {
+                defer std.log.debug("thread for cacheThread({d}) done", .{id});
                 defer freeItems(gpa, items2);
                 cacheThread(gpa, id, items2) catch |err| {
-                    std.debug.print("failed to cache thread: {any}", .{err});
+                    std.log.debug("failed to cache thread: {any}", .{err});
                     printStackTrace(@errorReturnTrace());
                 };
             }
@@ -493,6 +578,22 @@ pub fn fetchThread(self: *Self, allocator: Allocator, opID: ItemID) ![]const Ite
     }
 
     return items;
+}
+
+pub fn fillItems(
+    arena: Allocator,
+    items: []Item,
+    dest: *std.AutoHashMapUnmanaged(ItemID, Item),
+) !void {
+    for (items, 0..) |item, i| {
+        var copy = item;
+
+        if (item.parent) |parent_id| if (dest.get(parent_id)) |parent| {
+            copy.depth = parent.depth + 1;
+            items[i].depth = copy.depth;
+        };
+        try dest.put(arena, item.id, copy);
+    }
 }
 
 fn compareItem(_: void, a: Item, b: Item) bool {
@@ -513,6 +614,35 @@ fn dupeItems(allocator: Allocator, items: []const Item) ![]const Item {
     return copy;
 }
 
+fn loadSubThreadCache(
+    self: *Self,
+    allocator: Allocator,
+    opID: ItemID,
+) !?[]const Item {
+    var queue: std.ArrayList(ItemID) = try .initCapacity(allocator, 64);
+    defer queue.deinit(allocator);
+
+    var result: std.ArrayList(Item) = try .initCapacity(allocator, 16);
+    defer result.deinit(allocator);
+    errdefer {
+        for (result.items) |item| {
+            item.free(allocator);
+        }
+    }
+
+    try queue.append(allocator, opID);
+
+    while (queue.pop()) |item_id| {
+        const item = try self.loadItemCache(allocator, item_id) orelse {
+            return null;
+        };
+        try result.append(allocator, item);
+        try queue.appendSlice(allocator, item.kids);
+    }
+
+    return try result.toOwnedSlice(allocator);
+}
+
 fn loadThreadCache(
     self: *Self,
     allocator: Allocator,
@@ -527,9 +657,16 @@ fn loadThreadCache(
     });
     defer allocator.free(filename);
 
-    const ids = try self.loadCacheFile(allocator, []const ItemID, filename) orelse {
-        return null;
+    const maybe_ids = self.loadCacheFile(allocator, []const ItemID, filename) catch |err| {
+        switch (err) {
+            Error.InvalidCacheFile => {
+                return self.loadSubThreadCache(allocator, opID);
+            },
+            else => return err,
+        }
     };
+
+    const ids = maybe_ids orelse return null;
     defer allocator.free(ids);
 
     return try self.fetchAllItems(allocator, ids);
@@ -545,7 +682,10 @@ fn loadItemCache(self: *Self, allocator: Allocator, id: ItemID) !?Item {
     });
     defer allocator.free(filename);
 
-    return self.loadCacheFile(allocator, Item, filename);
+    return self.loadCacheFile(allocator, Item, filename) catch |err| {
+        if (err == Error.InvalidCacheFile) return null;
+        return err;
+    };
 }
 
 fn loadFeedCache(self: *Self, allocator: Allocator, feed_name: []const u8) !?[]const ItemID {
@@ -558,7 +698,10 @@ fn loadFeedCache(self: *Self, allocator: Allocator, feed_name: []const u8) !?[]c
     });
     defer allocator.free(filename);
 
-    return self.loadCacheFile(allocator, []const ItemID, filename);
+    return self.loadCacheFile(allocator, []const ItemID, filename) catch |err| {
+        if (err == Error.InvalidCacheFile) return null;
+        return err;
+    };
 }
 
 fn loadCacheFile(
@@ -572,7 +715,7 @@ fn loadCacheFile(
             std.fs.File.OpenError.FileNotFound,
             std.fs.File.OpenError.BadPathName,
             => {
-                return null;
+                return Error.InvalidCacheFile;
             },
             else => return null,
         }
@@ -646,6 +789,7 @@ fn cacheItem(allocator: Allocator, item: Item) !void {
 }
 
 fn cacheThread(allocator: Allocator, opID: ItemID, items: []const Item) !void {
+    defer std.log.debug("caching thread {d} with {d} items", .{ opID, items.len });
     try std.fs.cwd().makePath(".zlacker-cache");
 
     const basename = try std.fmt.allocPrint(allocator, "thread-{d}", .{opID});
@@ -748,8 +892,6 @@ test fetchThread {
     var hn: Self = try .init(allocator);
     defer hn.deinit(allocator);
 
-    try hn.startStaleCacheRemover(allocator);
-
     const items = try hn.fetchThread(allocator, 1727731);
     defer freeItems(allocator, items);
 
@@ -765,6 +907,18 @@ test fetchThread {
         count += 1;
     }
     std.debug.print("total num items: {d}\n", .{count});
-
-    hn.waitBackgroundTasks();
 }
+
+// TODO: I can't write the whole thread-12831823 file
+// since accessing the sub-threads will create a whole
+// new different file, which will result in a large disk usage,
+// it's better to write individual item files
+
+// TODO: use sqlite since concurrent file reading/writing
+// isn't good/safe
+// or not, not worth the dependency?
+// if the cache file is corrupted, then just refetch, no biggie
+
+// TODO: a background task that removes stale old cache files
+// to prevent disk usage build up
+// hn.startDeleteStaleCache
