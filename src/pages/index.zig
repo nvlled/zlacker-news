@@ -46,6 +46,9 @@ pub fn render(ctx: *RequestContext, data: Data) !void {
     layout.end();
 }
 
+// TODO: handle single-core systems
+// TODO: use algolia too for the feed page
+
 // TODO: wrap lines of <pre><code>
 // TODO: add [source] links
 // TODO: add [comment chain] /discussion?id=1231231
