@@ -58,14 +58,6 @@ const Handler = struct {
 };
 
 pub fn startServer() !void {
-    //     var dba: std.heap.DebugAllocator(.{}) = .init;
-    //     var tsa: std.heap.ThreadSafeAllocator = .{
-    //         .child_allocator = if (@import("builtin").mode == .Debug)
-    //             dba.allocator()
-    //         else
-    //             std.heap.smp_allocator,
-    //     };
-    //     const allocator = tsa.allocator();
     const allocator = std.heap.smp_allocator;
 
     var hn: HN = try .init(allocator);
@@ -75,6 +67,7 @@ pub fn startServer() !void {
 
     const port = 8000;
     var server = try httpz.Server(Handler).init(allocator, .{
+        .address = "0.0.0.0",
         .port = port,
         .timeout = .{
             .request = 1000,
@@ -102,7 +95,8 @@ pub fn startServer() !void {
 
 const Controllers = struct {
     fn assets(ctx: *RequestContext) !void {
-        const filename = ctx.req.url.path[0..Assets.max_name_len];
+        const path = ctx.req.url.path;
+        const filename = path[0..@min(path.len, Assets.max_name_len)];
 
         const t: Assets.Names = std.meta.stringToEnum(Assets.Names, filename) orelse {
             ctx.res.status = 404;

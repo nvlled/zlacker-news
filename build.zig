@@ -28,6 +28,11 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    const zeit = b.dependency("zeit", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
     const httpz = b.dependency("httpz", .{
         .target = target,
         .optimize = optimize,
@@ -46,6 +51,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .imports = &.{
             .{ .name = "zhtml", .module = zhtml.module("zhtml") },
+            .{ .name = "zeit", .module = zeit.module("zeit") },
             .{ .name = "httpz", .module = httpz.module("httpz") },
         },
     });

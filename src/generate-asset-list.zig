@@ -66,7 +66,14 @@ pub fn main() !void {
         \\
     );
 
-    try w.print("pub const max_name_len = {d};\n", .{maxlen});
+    try w.writeAll(
+        \\pub fn link(t: Names) []const u8 {
+        \\    return @tagName(t);
+        \\}
+        \\
+    );
+
+    try w.print("\npub const max_name_len = {d};\n", .{maxlen});
 
     try w.flush();
     const output = try buffer.toOwnedSlice();

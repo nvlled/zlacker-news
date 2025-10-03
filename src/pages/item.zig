@@ -1,4 +1,5 @@
 const std = @import("std");
+const zeit = @import("zeit");
 const Allocator = std.mem.Allocator;
 const sprintf = std.fmt.allocPrint;
 const HN = @import("../hn.zig");
@@ -21,20 +22,20 @@ pub fn render(ctx: *RequestContext, data: Data) !void {
     var replyLink: ReplyLink = .{ .zhtml = z };
 
     if (items.len == 0) {
-        layout.begin(.{ .title = "empty" });
+        try layout.begin(.{ .title = "empty" });
         z.em.render("no items found");
         layout.end();
         return;
     }
 
     const op: HN.Item = items[0];
+    replyLink.base_id = op.id;
+
     std.log.debug("rendering pages/item.zig with thread {d}", .{op.id});
 
-    layout.begin(.{ .title = op.title });
+    try layout.begin(.{ .title = op.title });
 
     if (op.parent == null) {
-        replyLink.base_id = op.id;
-
         z.div.attrs(.{
             .id = try sprintf(arena, "{d}", .{op.id}),
             .class = "op item",
@@ -48,10 +49,23 @@ pub fn render(ctx: *RequestContext, data: Data) !void {
             }
             z.h1.@"</>"();
 
-            try z.print(arena, "submitted by {s} on {d}", .{
-                try encodeName(arena, op, op.id),
-                op.time,
-            });
+            if (op.url) |url| z.a.attr(.href, url);
+            z.a.render("[view article]");
+
+            const dt = try formatDateTime(arena, op.time);
+            const name = try encodeName(arena, op, op.id);
+            try z.print(
+                arena,
+                "submitted by {s} on {s} | {d} points {d} comments",
+                .{
+                    name,
+                    dt,
+                    op.score,
+                    items.len - 1,
+                },
+            );
+            arena.free(name);
+            arena.free(dt);
 
             if (op.text.len > 0) {
                 z.p.@"<>"();
@@ -68,6 +82,7 @@ pub fn render(ctx: *RequestContext, data: Data) !void {
             z.a.render("[parent]");
             try z.a.attrf(arena, .href, "/item?id={d}", .{tid});
             z.a.render("[thread]");
+            try z.print(arena, " {d} comments", .{items.len - 1});
         }
         z.div.@"</>"();
     }
@@ -75,24 +90,6 @@ pub fn render(ctx: *RequestContext, data: Data) !void {
     const start: usize = if (items[0].parent != null) 0 else 1;
 
     for (items[start..], 0..) |item, n| {
-        const parent = if (item.parent) |parent_id|
-            lookup.get(parent_id)
-        else
-            null;
-
-        const prev_sibling = blk: {
-            const p = parent orelse break :blk null;
-            if (item.sibling_num == 0) break :blk null;
-            const sib_id = p.kids[item.sibling_num - 1];
-            break :blk lookup.get(sib_id);
-        };
-        const next_sibling = blk: {
-            const p = parent orelse break :blk null;
-            if (item.sibling_num >= p.kids.len - 1) break :blk null;
-            const sib_id = p.kids[item.sibling_num + 1];
-            break :blk lookup.get(sib_id);
-        };
-
         z.div.attrs(.{
             .id = try sprintf(arena, "{d}", .{item.id}),
             .class = "item",
@@ -108,29 +105,52 @@ pub fn render(ctx: *RequestContext, data: Data) !void {
                     z.div.render("");
 
                     const name = try encodeName(arena, item, replyLink.base_id);
-                    defer arena.free(name);
                     try z.print(arena, "{d}. {s}", .{
                         n + 1,
                         name,
                     });
+                    arena.free(name);
 
                     try z.a.attrf(arena, .href, "/item?id={d}", .{item.id});
                     z.a.render("[link]");
+
+                    const dt = try formatDateTime(arena, item.time);
+                    z.span.render(dt);
+                    arena.free(dt);
                 }
                 z.div.@"</>"();
 
-                z.div.@"<>"();
-                if (prev_sibling) |sib| {
-                    z.a.attr(.href, try sprintf(arena, "#{d}", .{sib.id}));
-                    z.a.attr(.title, "previous sibling comment");
-                    z.a.render("<~");
+                {
+                    //const parent = if (item.parent) |parent_id|
+                    //    lookup.get(parent_id)
+                    //else
+                    //    null;
+
+                    //const prev_sibling = blk: {
+                    //    const p = parent orelse break :blk null;
+                    //    if (item.sibling_num == 0) break :blk null;
+                    //    const sib_id = p.kids[item.sibling_num - 1];
+                    //    break :blk lookup.get(sib_id);
+                    //};
+                    //const next_sibling = blk: {
+                    //    const p = parent orelse break :blk null;
+                    //    if (item.sibling_num >= p.kids.len - 1) break :blk null;
+                    //    const sib_id = p.kids[item.sibling_num + 1];
+                    //    break :blk lookup.get(sib_id);
+                    //};
+                    //z.div.@"<>"();
+                    //if (prev_sibling) |sib| {
+                    //    z.a.attr(.href, try sprintf(arena, "#{d}", .{sib.id}));
+                    //    z.a.attr(.title, "previous sibling comment");
+                    //    z.a.render("<~");
+                    //}
+                    //if (next_sibling) |sib| {
+                    //    z.a.attr(.href, try sprintf(arena, "#{d}", .{sib.id}));
+                    //    z.a.attr(.title, "next sibling comment");
+                    //    z.a.render("~>");
+                    //}
+                    //z.div.@"</>"();
                 }
-                if (next_sibling) |sib| {
-                    z.a.attr(.href, try sprintf(arena, "#{d}", .{sib.id}));
-                    z.a.attr(.title, "next sibling comment");
-                    z.a.render("~>");
-                }
-                z.div.@"</>"();
             }
             z.div.@"</>"();
 
@@ -144,11 +164,11 @@ pub fn render(ctx: *RequestContext, data: Data) !void {
             z.div.@"</>"();
 
             z.small.@"<>"();
-            try z.print(arena, "replies: ({d})", .{item.kids.len});
+            try z.print(arena, "replies({d}): ", .{item.kids.len});
             z.small.@"</>"();
 
             if (item.kids.len > 0) {
-                z.div.@"<>"();
+                z.span.@"<>"();
                 for (item.kids) |rep_id| {
                     z.small.@"<>"();
                     replyLink.attr(.class, "resp");
@@ -156,7 +176,7 @@ pub fn render(ctx: *RequestContext, data: Data) !void {
                     z.write(" ");
                     z.small.@"</>"();
                 }
-                z.div.@"</>"();
+                z.span.@"</>"();
             }
         }
         z.div.@"</>"();
@@ -205,9 +225,7 @@ const ReplyLink = struct {
     }
 };
 
-// >>[username]+[encoded id]
-//const encodeChars = "abcdefghijklmnopqrstuvwxyz0123456789~";
-const encodeChars = "0123456789abcdefghijklmnopqrstuvwxyz";
+const encodeChars = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
 
 fn encodeName(arena: Allocator, item: HN.Item, base_id: u64) ![]const u8 {
     const by = item.by[0..@min(item.by.len, 6)];
@@ -237,4 +255,25 @@ fn encodeID(arena: Allocator, id: u64) ![]const u8 {
 fn u64AsString(n: u64) []const u8 {
     const arr: [8]u8 = @bitCast(n);
     return arr[0..4];
+}
+
+fn formatDateTime(arena: Allocator, time: i64) ![]const u8 {
+    // TODO: use js to get client time zone
+    //console.log(Intl.DateTimeFormat().resolvedOptions().timeZone)
+    //document.cookie = "";
+    // then store that in a cookie
+
+    const inst = try zeit.instant(.{
+        .source = .{ .unix_timestamp = time },
+    });
+    const t = inst.time();
+
+    return std.fmt.allocPrint(arena, "{d}-{d:02}-{d:02} {d:02}:{d:02}:{d:02}", .{
+        t.year,
+        t.month,
+        t.day,
+        t.hour,
+        t.minute,
+        t.second,
+    });
 }

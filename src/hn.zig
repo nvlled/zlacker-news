@@ -33,7 +33,7 @@ pub const Item = struct {
     url: ?String = null,
     descendants: usize = 0,
     kids: []const ItemID = &.{},
-    time: ItemID = 0,
+    time: i64 = 0,
     type: String = "",
     text: String = "",
     deleted: bool = false,
@@ -145,7 +145,10 @@ pub fn startStaleCacheRemover(self: *Self, allocator: Allocator) !void {
 const dirname = ".zlacker-cache";
 pub fn removeStaleCacheFiles(allocator: Allocator, expiration: i138) !void {
     std.log.debug("removing stale cache files", .{});
-    var dir = try std.fs.cwd().openDir(dirname, .{ .iterate = true });
+    var dir = std.fs.cwd().openDir(dirname, .{ .iterate = true }) catch |err| {
+        if (err == error.FileNotFound) return;
+        return err;
+    };
     defer dir.close();
 
     var iter = dir.iterate();
@@ -328,7 +331,7 @@ const AlgoliaItem = struct {
     parent_id: ?ItemID = null,
     points: ?usize = null,
     author: []const u8 = "",
-    created_at_i: u64 = 0,
+    created_at_i: i64 = 0,
     type: []const u8 = "",
     title: ?[]const u8 = null,
     text: ?[]const u8 = null,
@@ -378,7 +381,7 @@ pub fn fetchThreadAlgolia(self: *Self, allocator: Allocator, opID: ItemID) ![]It
             thread_id: ItemID,
             items: *std.ArrayList(Item),
             aitem: *const AlgoliaItem,
-        ) !void {
+        ) !usize {
             var kids = try gpa.alloc(ItemID, aitem.children.len);
             errdefer gpa.free(kids);
 
@@ -392,22 +395,28 @@ pub fn fetchThreadAlgolia(self: *Self, allocator: Allocator, opID: ItemID) ![]It
                 .type = aitem.type,
                 .title = aitem.title orelse "",
                 .text = aitem.text orelse "",
-                .kids = kids,
+                .kids = &.{},
                 .sibling_num = aitem.sibling_num,
                 .thread_id = aitem.story_id,
             }).dupe(gpa);
             errdefer item.free(gpa);
 
+            var comment_count: usize = 1;
             for (aitem.children, 0..) |child, i| {
                 kids[i] = child.id;
 
                 var sub_item = @constCast(&child);
                 sub_item.sibling_num = i;
-                try loop(gpa, thread_id, items, sub_item);
+                comment_count += try loop(gpa, thread_id, items, sub_item);
             }
+
             item.kids = kids;
+            item.descendants = comment_count;
 
             items.appendAssumeCapacity(item);
+
+            std.debug.print("huh {d}\n", .{comment_count});
+            return comment_count;
         }
     }.loop;
 
@@ -417,10 +426,10 @@ pub fn fetchThreadAlgolia(self: *Self, allocator: Allocator, opID: ItemID) ![]It
     defer result.deinit(allocator);
     errdefer for (result.items) |item| item.free(allocator);
 
-    try collect(allocator, opID, &result, &parsed.value);
+    _ = try collect(allocator, opID, &result, &parsed.value);
     std.log.debug("fetched thread {d} from algolia : got {d} items ", .{ opID, result.items.len });
 
-    return result.toOwnedSlice(allocator);
+    return try result.toOwnedSlice(allocator);
 }
 
 /// Caller must call Item.free() for each item and the free the slice itself

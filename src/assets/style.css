@@ -1,8 +1,14 @@
 
 body {
 	max-width: 800px;
-	background: #122;
+	background: #022;
 	color: #eee;
+}
+
+pre {
+	code {
+		overflow: scroll;
+	}
 }
 
 h1 > a,

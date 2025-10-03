@@ -9,7 +9,7 @@ pub const Attrs = struct {
     title: ?[]const u8 = null,
 };
 
-pub fn begin(self: @This(), attrs: Attrs) void {
+pub fn begin(self: @This(), attrs: Attrs) !void {
     const z = self.ctx.zhtml;
 
     z.@"writeUnsafe!?"("<!DOCTYPE html>");
@@ -38,7 +38,6 @@ pub fn begin(self: @This(), attrs: Attrs) void {
     z.a.attr(.href, "/");
     z.a.render("zlacker");
     z.h1.@"</>"();
-    z.hr.@"<>"();
 }
 
 pub fn end(self: @This()) void {
