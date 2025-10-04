@@ -100,11 +100,12 @@ pub const Item = struct {
 
 pub fn init(allocator: Allocator) !Self {
     const client: http.Client = .{ .allocator = allocator };
+    const n_jobs = @min(32, (std.Thread.getCpuCount() catch 1) * 8);
 
     const tpool: *std.Thread.Pool = try allocator.create(std.Thread.Pool);
     try tpool.init(.{
         .allocator = allocator,
-        .n_jobs = (std.Thread.getCpuCount() catch 1) * 2,
+        .n_jobs = n_jobs,
     });
 
     return .{
