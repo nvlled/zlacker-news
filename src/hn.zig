@@ -8,7 +8,7 @@ thread_pool: *std.Thread.Pool,
 
 cache: struct {
     remover_task_active: bool = false,
-    expiration_sec: i128 = if (builtin.mode == .Debug) 8 * 60 * 60 else 1 * 60,
+    expiration_sec: i128 = if (builtin.mode == .Debug) 8 * 60 * 60 else 10 * 60,
     wg: std.Thread.WaitGroup = .{},
 } = .{},
 
