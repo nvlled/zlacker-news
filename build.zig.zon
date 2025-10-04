@@ -33,8 +33,8 @@
     // internet connectivity.
     .dependencies = .{
         .zhtml = .{
-            .url = "git+https://github.com/nvlled/zhtml#cd0b4b793e0bf8cc613f762e28bec7c14b2f76df",
-            .hash = "zhtml-0.0.0-AweI6VPYAADwS3JwV0jJKkeKmOYKM-K5iXHb8W04Lvk0",
+            .url = "git+https://github.com/nvlled/zhtml#90a48a709665fc563ada9223f34ea25fc79809e4",
+            .hash = "zhtml-0.0.0-AweI6ZbYAAB9gRhfGaEwFPqXjka6nX5bSWJHsJ27gVIC",
         },
         .httpz = .{
             .url = "git+https://github.com/karlseguin/http.zig?ref=master#18e0f2d2b64fcc8d8351e6b0b734170b46f91024",

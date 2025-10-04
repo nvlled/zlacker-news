@@ -1,6 +1,6 @@
 
 body {
-	max-width: 800px;
+	max-width: 1000px;
 	background: #022;
 	color: #eee;
 }
@@ -28,18 +28,20 @@ a.replink {
 }
 
 .item {
+	margin-bottom: 25px;
+	&.op { margin-bottom: 1px };
+
+	h1 {
+		margin: 0;
+	}
+
 	pre {
 		overflow: auto;
 	}
 
 	.header {
-		font-weight: 700;
 		margin-top: 20px;
 		margin-bottom: 5px;
-
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
 	}
 
 	.margin {

@@ -49,9 +49,6 @@ pub fn render(ctx: *RequestContext, data: Data) !void {
             }
             z.h1.@"</>"();
 
-            if (op.url) |url| z.a.attr(.href, url);
-            z.a.render("[view article]");
-
             const dt = try formatDateTime(arena, op.time);
             const name = try encodeName(arena, op, op.id);
             try z.print(
@@ -66,6 +63,15 @@ pub fn render(ctx: *RequestContext, data: Data) !void {
             );
             arena.free(name);
             arena.free(dt);
+
+            z.br.render();
+            if (op.url) |url| {
+                z.a.attr(.href, url);
+                z.a.render("[view article]");
+            }
+            z.a.attr(.id, "top");
+            z.a.attr(.href, "#bottom");
+            z.a.render("[go to bottom]");
 
             if (op.text.len > 0) {
                 z.p.@"<>"();
@@ -156,31 +162,39 @@ pub fn render(ctx: *RequestContext, data: Data) !void {
 
             z.div.@"<>"();
             if (item.parent) |p| {
-                if (p == op.id) replyLink.attr(.class, "op");
-                try replyLink.render(arena, lookup.get(p));
-                z.br.@"<>"();
+                if (lookup.get(p)) |parent| {
+                    if (p == op.id) replyLink.attr(.class, "op");
+                    try replyLink.render(arena, parent);
+                    z.br.@"<>"();
+                }
             }
             z.@"writeUnsafe!?"(item.text);
             z.div.@"</>"();
 
-            z.small.@"<>"();
-            try z.print(arena, "replies({d}): ", .{item.kids.len});
-            z.small.@"</>"();
-
             if (item.kids.len > 0) {
-                z.span.@"<>"();
-                for (item.kids) |rep_id| {
-                    z.small.@"<>"();
-                    replyLink.attr(.class, "resp");
-                    try replyLink.render(arena, lookup.get(rep_id));
-                    z.write(" ");
-                    z.small.@"</>"();
+                z.small.@"<>"();
+                try z.print(arena, "replies({d}): ", .{item.kids.len});
+                z.small.@"</>"();
+
+                if (item.kids.len > 0) {
+                    z.span.@"<>"();
+                    for (item.kids) |rep_id| {
+                        z.small.@"<>"();
+                        replyLink.attr(.class, "resp");
+                        try replyLink.render(arena, lookup.get(rep_id));
+                        z.write(" ");
+                        z.small.@"</>"();
+                    }
+                    z.span.@"</>"();
                 }
-                z.span.@"</>"();
             }
         }
+
         z.div.@"</>"();
     }
+    z.a.attr(.id, "bottom");
+    z.a.attr(.href, "#top");
+    z.a.render("[go to top]");
 
     layout.end();
 
@@ -192,7 +206,9 @@ const ReplyLink = struct {
     base_id: HN.ItemID = 0,
     class: []const u8 = "",
 
-    const AttrEnum = enum { class };
+    const AttrEnum = enum {
+        class,
+    };
 
     pub fn attr(self: *@This(), key: AttrEnum, value: []const u8) void {
         switch (key) {
@@ -217,6 +233,10 @@ const ReplyLink = struct {
             .class = try sprintf(arena, "replink {s}", .{
                 self.class,
             }),
+            .title = if (item.text.len < 200)
+                item.text
+            else
+                try sprintf(arena, "{s}...", .{item.text[0..200]}),
         });
 
         z.a.@"<>"();
