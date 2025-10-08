@@ -36,17 +36,10 @@ a.replink {
 
 	&:nth-child(odd) { background: #002e2e; }
 
-	a {
-		word-break: break-all;
-	}
+	a { word-break: break-all; }
 
-	.reply-links {
-		display: inline-block;
-
-		a {
-			word-break: unset;
-			display: inline-block;
-		}
+	.reply-links a {
+		word-break: unset;
 	}
 
 	h1 {

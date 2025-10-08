@@ -184,10 +184,14 @@ pub fn fetchTopStoryIDs(
 
     try self.db.insertFeed(.top_stories, parsed.value);
 
-    const ids = try allocator.alloc(ItemID, @min(parsed.value.len, limit));
-    @memcpy(ids, parsed.value[offset .. offset + limit]);
+    const i = @min(offset, parsed.value.len);
+    const j = @min(i + limit, parsed.value.len);
+    const ids = parsed.value[i..j];
 
-    return ids;
+    const result = try allocator.alloc(ItemID, ids.len);
+    @memcpy(result, ids);
+
+    return result;
 }
 
 // Caller must call Item.free() afterwards
@@ -267,7 +271,6 @@ pub fn fetchAllItems(self: *Self, allocator: Allocator, ids: []const ItemID) ![]
 
                     const item = args.hn.fetchItem(args.allocator, args.id) catch |err| {
                         std.debug.print("error while fetching {d}\n", .{args.id});
-                        if (!!true) @panic("TODO");
                         args.err.* = err;
                         return;
                     };
