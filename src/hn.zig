@@ -1,14 +1,15 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const http = std.http;
+const zqlite = @import("zqlite");
 const Allocator = std.mem.Allocator;
 
 client: http.Client,
 thread_pool: *std.Thread.Pool,
+db: DB,
 
 cache: struct {
     remover_task_active: bool = false,
-    expiration_sec: i128 = if (builtin.mode == .Debug) 8 * 60 * 60 else 10 * 60,
     wg: std.Thread.WaitGroup = .{},
 } = .{},
 
@@ -22,6 +23,11 @@ const Self = @This();
 const String = []const u8;
 
 const sec_to_nano: i128 = 1e9;
+
+pub const Feed = enum {
+    top_stories,
+    ask_hn,
+};
 
 pub const Item = struct {
     // NOTE: make sure all fields have default values,
@@ -39,10 +45,11 @@ pub const Item = struct {
     deleted: bool = false,
     dead: bool = false,
     parent: ?ItemID = null,
-    sibling_num: ItemID = 0,
     thread_id: ?ItemID = null,
 
     depth: u8 = 0,
+    inserted: i64 = 0,
+    duped: bool = false,
 
     // Caller must free Item.free() afterwards
     pub fn dupe(self: Item, allocator: Allocator) !Item {
@@ -83,8 +90,12 @@ pub const Item = struct {
             .dead = self.dead,
             .parent = self.parent,
 
-            .sibling_num = self.sibling_num,
             .thread_id = self.thread_id,
+
+            .depth = self.depth,
+            .inserted = self.inserted,
+
+            .duped = true,
         };
     }
 
@@ -107,16 +118,27 @@ pub fn init(allocator: Allocator) !Self {
         .allocator = allocator,
         .n_jobs = n_jobs,
     });
+    errdefer {
+        tpool.deinit();
+        allocator.destroy(tpool);
+    }
+
+    const db: DB = try .init(allocator, n_jobs);
+    errdefer db.deinit();
+
+    try db.createDatabase();
 
     return .{
         .client = client,
         .thread_pool = tpool,
+        .db = db,
     };
 }
 
 pub fn deinit(self: *Self, allocator: Allocator) void {
     self.client.deinit();
     self.thread_pool.deinit();
+    self.db.deinit();
     allocator.destroy(self.thread_pool);
 }
 
@@ -124,66 +146,8 @@ pub fn waitBackgroundTasks(self: *Self) void {
     self.thread_pool.waitAndWork(&self.cache.wg);
 }
 
-pub fn startStaleCacheRemover(self: *Self, allocator: Allocator) !void {
-    const task = struct {
-        fn _(alloc: Allocator, expiration: i138) void {
-            while (true) {
-                defer std.Thread.sleep(60 * 1 * sec_to_nano);
-                removeStaleCacheFiles(alloc, expiration) catch |err| {
-                    std.debug.print("an error occured while removing caches: {any}\n", .{err});
-                };
-            }
-        }
-    }._;
-
-    const thread = try std.Thread.spawn(.{}, task, .{
-        allocator,
-        self.cache.expiration_sec * sec_to_nano,
-    });
-    thread.detach();
-}
-
-const dirname = ".zlacker-cache";
-pub fn removeStaleCacheFiles(allocator: Allocator, expiration: i138) !void {
-    std.log.debug("removing stale cache files", .{});
-    var dir = std.fs.cwd().openDir(dirname, .{ .iterate = true }) catch |err| {
-        if (err == error.FileNotFound) return;
-        return err;
-    };
-    defer dir.close();
-
-    var iter = dir.iterate();
-    while (try iter.next()) |entry| {
-        defer std.Thread.sleep(1 * sec_to_nano);
-
-        const filename = try std.fs.path.join(allocator, &.{ dirname, entry.name });
-        defer allocator.free(filename);
-
-        const stat = std.fs.cwd().statFile(filename) catch continue;
-        const elapsed = std.time.nanoTimestamp() - stat.mtime;
-        if (elapsed > expiration) {
-            std.fs.cwd().deleteFile(filename) catch |err| {
-                std.log.debug("failed to delete cache file : {any}\n", .{err});
-                continue;
-            };
-            std.log.debug("-> cache file deleted: {s}\n", .{filename});
-        }
-    }
-}
-
 // Caller must free returned string
 pub fn fetch(self: *Self, arena: Allocator, url: []const u8) ![]const u8 {
-    // TODO: okay, I thought it's was a deadlock on a
-    // mutex that's causing it to hang,
-    // but it seems to happen here.
-    // Maybe a bug in the zig http client,
-    // I could probably add a timeout.
-    // Well actually it's also possible to be blocking
-    // on allocation which is protected by a mutex.
-    // It seems to happen though when I leave the
-    // program running after a while.
-    // Maybe it's the connection pool too?
-
     std.log.debug("fetching url {s}", .{url});
     defer std.log.debug("fetched url {s}", .{url});
     var buf: std.Io.Writer.Allocating = .init(arena);
@@ -202,8 +166,13 @@ pub fn fetch(self: *Self, arena: Allocator, url: []const u8) ![]const u8 {
 }
 
 // Caller must free returned slice
-pub fn fetchTopStoryIDs(self: *Self, allocator: Allocator) ![]const ItemID {
-    if (try self.loadFeedCache(allocator, "topstories")) |ids| {
+pub fn fetchTopStoryIDs(
+    self: *Self,
+    allocator: Allocator,
+    limit: usize,
+    offset: usize,
+) ![]const ItemID {
+    if (try self.db.readFeed(allocator, .top_stories, limit, offset)) |ids| {
         return ids;
     }
 
@@ -213,22 +182,16 @@ pub fn fetchTopStoryIDs(self: *Self, allocator: Allocator) ![]const ItemID {
     const parsed = try std.json.parseFromSlice([]const u64, allocator, json_str, .{});
     defer parsed.deinit();
 
-    const ids = try allocator.dupe(ItemID, parsed.value);
+    try self.db.insertFeed(.top_stories, parsed.value);
 
-    cacheFeed(allocator, "topstories", ids) catch |err| {
-        std.debug.print("failed to cache feed {s} : {any}", .{ "topstories", err });
-        printStackTrace(@errorReturnTrace());
-    };
+    const ids = try allocator.alloc(ItemID, @min(parsed.value.len, limit));
+    @memcpy(ids, parsed.value[offset .. offset + limit]);
 
     return ids;
 }
 
 // Caller must call Item.free() afterwards
 pub fn fetchItem(self: *Self, allocator: Allocator, id: ItemID) !Item {
-    if (try self.loadItemCache(allocator, id)) |item| {
-        return item;
-    }
-
     const url = try std.fmt.allocPrint(allocator, "https://hacker-news.firebaseio.com/v0/item/{d}.json", .{
         id,
     });
@@ -243,6 +206,7 @@ pub fn fetchItem(self: *Self, allocator: Allocator, id: ItemID) !Item {
     defer parsed.deinit();
 
     const item = try parsed.value.dupe(allocator);
+    errdefer item.free(allocator);
 
     std.sort.block(ItemID, @constCast(item.kids), {}, struct {
         fn _(_: void, a: ItemID, b: ItemID) bool {
@@ -250,26 +214,23 @@ pub fn fetchItem(self: *Self, allocator: Allocator, id: ItemID) !Item {
         }
     }._);
 
-    cacheItem(allocator, item) catch |err| {
-        std.debug.print("failed to cache item: {any}", .{err});
-        printStackTrace(@errorReturnTrace());
-    };
-
     return item;
 }
 
 // Caller must call Item.free() for each item and the free the slice itself
 pub fn fetchAllItems(self: *Self, allocator: Allocator, ids: []const ItemID) ![]const Item {
-    switch (ids.len) {
-        0 => return allocator.dupe(Item, &.{}),
-        1 => {
-            const item = try self.fetchItem(allocator, ids[0]);
-            return allocator.dupe(Item, &.{item});
-        },
-        else => {},
+    const cached_items = try self.db.readItems(allocator, ids);
+    if (cached_items) |items| {
+        return items;
     }
 
     const items: []Item = try allocator.alloc(Item, ids.len);
+    errdefer {
+        for (items) |item| {
+            if (item.duped) item.free(allocator);
+        }
+        allocator.free(items);
+    }
 
     var wg: std.Thread.WaitGroup = .{};
 
@@ -305,6 +266,8 @@ pub fn fetchAllItems(self: *Self, allocator: Allocator, ids: []const ItemID) ![]
                     defer args.allocator.destroy(args);
 
                     const item = args.hn.fetchItem(args.allocator, args.id) catch |err| {
+                        std.debug.print("error while fetching {d}\n", .{args.id});
+                        if (!!true) @panic("TODO");
                         args.err.* = err;
                         return;
                     };
@@ -324,6 +287,8 @@ pub fn fetchAllItems(self: *Self, allocator: Allocator, ids: []const ItemID) ![]
         return err;
     }
 
+    try self.db.insertItems(items);
+
     return items;
 }
 
@@ -338,8 +303,6 @@ const AlgoliaItem = struct {
     text: ?[]const u8 = null,
     url: ?[]const u8 = null,
     story_id: ?ItemID = null,
-
-    sibling_num: usize = 0,
 
     children: []const AlgoliaItem = &.{},
 };
@@ -397,7 +360,6 @@ pub fn fetchThreadAlgolia(self: *Self, allocator: Allocator, opID: ItemID) ![]It
                 .title = aitem.title orelse "",
                 .text = aitem.text orelse "",
                 .kids = &.{},
-                .sibling_num = aitem.sibling_num,
                 .thread_id = aitem.story_id,
             }).dupe(gpa);
             errdefer item.free(gpa);
@@ -406,8 +368,7 @@ pub fn fetchThreadAlgolia(self: *Self, allocator: Allocator, opID: ItemID) ![]It
             for (aitem.children, 0..) |child, i| {
                 kids[i] = child.id;
 
-                var sub_item = @constCast(&child);
-                sub_item.sibling_num = i;
+                const sub_item = @constCast(&child);
                 comment_count += try loop(gpa, thread_id, items, sub_item);
             }
 
@@ -416,7 +377,6 @@ pub fn fetchThreadAlgolia(self: *Self, allocator: Allocator, opID: ItemID) ![]It
 
             items.appendAssumeCapacity(item);
 
-            std.debug.print("huh {d}\n", .{comment_count});
             return comment_count;
         }
     }.loop;
@@ -449,14 +409,12 @@ pub fn fetchThreadOfficial(self: *Self, allocator: Allocator, opID: ItemID) ![]I
 
     const QueueEntry = struct {
         id: ItemID,
-        sibling_num: usize,
     };
     var queue: std.ArrayList(QueueEntry) = .{};
     defer queue.deinit(allocator);
 
     try queue.append(allocator, .{
         .id = opID,
-        .sibling_num = 0,
     });
 
     const SpawnContext = struct {
@@ -502,7 +460,6 @@ pub fn fetchThreadOfficial(self: *Self, allocator: Allocator, opID: ItemID) ![]I
         self.thread_pool.spawnWg(&wg, struct {
             fn _(ctx: *SpawnContext) void {
                 const id = ctx.entry.id;
-                const sibling_num = ctx.entry.sibling_num;
 
                 defer ctx.allocator.destroy(ctx);
 
@@ -511,29 +468,30 @@ pub fn fetchThreadOfficial(self: *Self, allocator: Allocator, opID: ItemID) ![]I
                     return;
                 };
 
-                item.sibling_num = sibling_num;
                 item.thread_id = ctx.thread_id;
 
-                ctx.items_mu.lock();
-                ctx.items.append(ctx.allocator, item) catch |err| {
-                    ctx.items_mu.unlock();
-                    ctx.err.* = err;
-                    item.free(ctx.allocator);
-                    return;
-                };
-                ctx.items_mu.unlock();
-
-                ctx.queue_mu.lock();
-                defer ctx.queue_mu.unlock();
-                for (item.kids, 0..) |kid, i| {
-                    const next: QueueEntry = .{
-                        .id = kid,
-                        .sibling_num = i,
-                    };
-                    ctx.queue.append(ctx.allocator, next) catch |err| {
+                {
+                    ctx.items_mu.lock();
+                    defer ctx.items_mu.unlock();
+                    ctx.items.append(ctx.allocator, item) catch |err| {
                         ctx.err.* = err;
+                        item.free(ctx.allocator);
                         return;
                     };
+                }
+
+                {
+                    ctx.queue_mu.lock();
+                    defer ctx.queue_mu.unlock();
+                    for (item.kids) |kid| {
+                        const next: QueueEntry = .{
+                            .id = kid,
+                        };
+                        ctx.queue.append(ctx.allocator, next) catch |err| {
+                            ctx.err.* = err;
+                            return;
+                        };
+                    }
                 }
             }
         }._, .{spawn_ctx});
@@ -547,16 +505,17 @@ pub fn fetchThreadOfficial(self: *Self, allocator: Allocator, opID: ItemID) ![]I
 
     return result.toOwnedSlice(allocator);
 }
+
 // Caller must call Item.free() for each item and the free the slice itself
 // Uses the Algolia API, then falls back to official HN API if it fails.
 pub fn fetchThread(self: *Self, allocator: Allocator, opID: ItemID) ![]const Item {
     std.log.debug("fetching thread {d}", .{opID});
     errdefer std.log.debug("failed to fetch thread {d}", .{opID});
 
-    const cached_items = try self.loadThreadCache(allocator, opID);
-    if (cached_items) |ci| {
-        std.log.debug("fetched cached thread {d}: found {d} items", .{ opID, ci.len });
-        return ci;
+    const cached_items = try self.db.readThread(allocator, opID);
+    if (cached_items) |items| {
+        std.log.debug("fetched cached thread {d}: found {d} items", .{ opID, items.len });
+        return items;
     }
 
     const items = blk: {
@@ -572,20 +531,7 @@ pub fn fetchThread(self: *Self, allocator: Allocator, opID: ItemID) ![]const Ite
 
     std.sort.block(Item, items, {}, compareItem);
 
-    {
-        const copy = try dupeItems(allocator, items);
-        std.log.debug("spawning thread for cacheThread({d})", .{opID});
-        self.thread_pool.spawn(struct {
-            fn _(gpa: Allocator, id: ItemID, items2: []const Item) void {
-                defer std.log.debug("thread for cacheThread({d}) done", .{id});
-                defer freeItems(gpa, items2);
-                cacheThread(gpa, id, items2) catch |err| {
-                    std.log.debug("failed to cache thread: {any}", .{err});
-                    printStackTrace(@errorReturnTrace());
-                };
-            }
-        }._, .{ allocator, opID, copy }) catch unreachable;
-    }
+    try self.db.insertItems(items);
 
     return items;
 }
@@ -624,213 +570,578 @@ fn dupeItems(allocator: Allocator, items: []const Item) ![]const Item {
     return copy;
 }
 
-fn loadSubThreadCache(
-    self: *Self,
-    allocator: Allocator,
-    opID: ItemID,
-) !?[]const Item {
-    var queue: std.ArrayList(ItemID) = try .initCapacity(allocator, 64);
-    defer queue.deinit(allocator);
+const DB = struct {
+    pool: *zqlite.Pool,
 
-    var result: std.ArrayList(Item) = try .initCapacity(allocator, 16);
-    defer result.deinit(allocator);
-    errdefer {
-        for (result.items) |item| {
-            item.free(allocator);
+    const expiration_sec: i128 = if (builtin.mode == .Debug) 8 * 60 * 60 else 10 * 60;
+    const items_limit: usize = 1e4 * 50;
+    const db_filename = "zlacker.db";
+
+    pub fn init(allocator: Allocator, pool_size: usize) !@This() {
+        return .{
+            .pool = try .init(allocator, .{
+                .path = db_filename,
+                .size = pool_size,
+            }),
+        };
+    }
+
+    pub fn deinit(self: @This()) void {
+        self.pool.deinit();
+    }
+
+    pub fn insertFeed(self: @This(), feed: Feed, ids: []const ItemID) !void {
+        const conn = self.pool.acquire();
+        defer conn.release();
+
+        try conn.execNoArgs("PRAGMA journal_mode=WAL2");
+        try conn.transaction();
+        defer conn.commit() catch unreachable;
+        errdefer conn.rollback();
+
+        errdefer std.log.err("failed to read item: {s}", .{conn.lastError()});
+
+        const stmt = try conn.prepare(
+            \\INSERT INTO hn_feed(feed, num, item_id, inserted) VALUES(?, ?, ?, ?);
+        );
+        defer stmt.deinit();
+
+        const now = std.time.timestamp();
+        for (ids, 0..) |id, index| {
+            try stmt.reset();
+            try stmt.bind(.{ @intFromEnum(feed), index, id, now });
+            _ = try stmt.step();
         }
     }
 
-    try queue.append(allocator, opID);
+    pub fn readFeed(
+        self: @This(),
+        allocator: Allocator,
+        feed: Feed,
+        limit: usize,
+        offset: usize,
+    ) !?[]const ItemID {
+        const conn = self.pool.acquire();
+        defer conn.release();
 
-    while (queue.pop()) |item_id| {
-        const item = try self.loadItemCache(allocator, item_id) orelse {
+        errdefer std.log.err("failed to read feed: {s}", .{conn.lastError()});
+
+        var result: std.ArrayList(ItemID) = .{};
+        defer result.deinit(allocator);
+
+        var rows = try conn.rows(
+            \\SELECT item_id, inserted from hn_feed WHERE feed = ? ORDER BY num ASC LIMIT ? OFFSET ?;
+        , .{ @intFromEnum(feed), limit, offset });
+        defer rows.deinit();
+
+        const now = std.time.timestamp();
+        var count: usize = 0;
+        while (rows.next()) |row| {
+            const inserted = row.int(1);
+
+            if (now - inserted >= expiration_sec) {
+                return null;
+            }
+
+            try result.append(allocator, @intCast(row.int(0)));
+            count += 1;
+        }
+
+        if (count == 0) return null;
+
+        return try result.toOwnedSlice(allocator);
+    }
+
+    pub fn readThread(
+        self: @This(),
+        allocator: Allocator,
+        opID: ItemID,
+    ) !?[]const Item {
+        var queue: std.ArrayList(ItemID) = .{};
+        defer queue.deinit(allocator);
+
+        var result: std.ArrayList(Item) = .{};
+        errdefer {
+            for (result.items) |item| item.free(allocator);
+            result.deinit(allocator);
+        }
+
+        const conn = self.pool.acquire();
+        defer conn.release();
+
+        errdefer std.log.err("failed to read item: {s}", .{conn.lastError()});
+
+        const item_stmt = try conn.prepare(
+            \\SELECT
+            \\  id,
+            \\  username,
+            \\  score,
+            \\  title,
+            \\  url,
+            \\  descendants,
+            \\  time,
+            \\  text,
+            \\  deleted,
+            \\  dead,
+            \\  parent_id,
+            \\  thread_id,
+            \\  depth,
+            \\  inserted,
+            \\  (SELECT COUNT(*) FROM hn_item_replies
+            \\    WHERE item_id = hn_items.id)
+            \\FROM hn_items
+            \\WHERE id = ?;
+        );
+        defer item_stmt.deinit();
+
+        const replies_stmt = try conn.prepare(
+            \\SELECT reply_id FROM hn_item_replies
+            \\WHERE item_id = ?;
+        );
+        defer replies_stmt.deinit();
+
+        try queue.append(allocator, opID);
+
+        const now = std.time.timestamp();
+
+        while (queue.pop()) |item_id| {
+            try item_stmt.reset();
+            try item_stmt.bind(.{item_id});
+
+            if (!try item_stmt.step()) {
+                continue;
+            }
+
+            var item = Item{
+                .id = @intCast(item_stmt.int(0)),
+                .by = item_stmt.text(1),
+                .score = @intCast(item_stmt.int(2)),
+                .title = item_stmt.text(3),
+                .url = item_stmt.nullableText(4),
+                .descendants = @intCast(item_stmt.int(5)),
+                .time = @intCast(item_stmt.int(6)),
+                .text = item_stmt.text(7),
+                .deleted = item_stmt.int(8) != 0,
+                .dead = item_stmt.int(9) != 0,
+                .parent = if (item_stmt.nullableInt(10)) |n| @intCast(n) else null,
+                .thread_id = if (item_stmt.nullableInt(11)) |n| @intCast(n) else null,
+                .depth = @intCast(item_stmt.int(12)),
+                .inserted = @intCast(item_stmt.int(13)),
+            };
+            const num_replies: usize = @intCast(item_stmt.int(14));
+
+            if (now - item.inserted >= expiration_sec) {
+                std.log.debug("thread cached expired: {d}", .{opID});
+                for (result.items) |x| x.free(allocator);
+                result.deinit(allocator);
+                return null;
+            }
+
+            item = try item.dupe(allocator);
+            errdefer item.free(allocator);
+
+            if (num_replies > 0) {
+                const replies: []ItemID = try allocator.alloc(ItemID, num_replies);
+                errdefer allocator.free(replies);
+
+                try replies_stmt.reset();
+                try replies_stmt.bind(.{item.id});
+
+                var i: usize = 0;
+                while (try replies_stmt.step()) {
+                    replies[i] = @intCast(replies_stmt.int(0));
+                    i += 1;
+                }
+                item.kids = replies;
+            }
+
+            try result.append(allocator, item);
+
+            try queue.ensureTotalCapacity(allocator, queue.items.len + item.kids.len);
+            const kids = item.kids;
+            for (0..kids.len) |i| {
+                queue.appendAssumeCapacity(kids[kids.len - i - 1]);
+            }
+        }
+
+        if (result.items.len == 0 or result.items.len < result.items[0].kids.len + 1) {
             return null;
-        };
-        try result.append(allocator, item);
-        try queue.appendSlice(allocator, item.kids);
-    }
-
-    return try result.toOwnedSlice(allocator);
-}
-
-fn loadThreadCache(
-    self: *Self,
-    allocator: Allocator,
-    opID: ItemID,
-) !?[]const Item {
-    const basename = try std.fmt.allocPrint(allocator, "thread-{d}", .{opID});
-    defer allocator.free(basename);
-
-    const filename = try std.fs.path.join(allocator, &.{
-        ".zlacker-cache",
-        basename,
-    });
-    defer allocator.free(filename);
-
-    const maybe_ids = self.loadCacheFile(allocator, []const ItemID, filename) catch |err| {
-        switch (err) {
-            Error.InvalidCacheFile => {
-                return self.loadSubThreadCache(allocator, opID);
-            },
-            else => return err,
         }
-    };
 
-    const ids = maybe_ids orelse return null;
-    defer allocator.free(ids);
+        const items = try result.toOwnedSlice(allocator);
 
-    return try self.fetchAllItems(allocator, ids);
-}
+        std.sort.block(Item, @constCast(items), {}, struct {
+            fn _(_: void, a: Item, b: Item) bool {
+                return a.id < b.id;
+            }
+        }._);
 
-fn loadItemCache(self: *Self, allocator: Allocator, id: ItemID) !?Item {
-    const basename = try std.fmt.allocPrint(allocator, "item-{d}", .{id});
-    defer allocator.free(basename);
+        return items;
+    }
 
-    const filename = try std.fs.path.join(allocator, &.{
-        ".zlacker-cache",
-        basename,
-    });
-    defer allocator.free(filename);
+    pub fn readItems(
+        self: @This(),
+        allocator: Allocator,
+        ids: []const ItemID,
+    ) !?[]const Item {
+        if (ids.len == 0) return &.{};
 
-    return self.loadCacheFile(allocator, Item, filename) catch |err| {
-        if (err == Error.InvalidCacheFile) return null;
-        return err;
-    };
-}
+        var queue: std.ArrayList(ItemID) = try .initCapacity(allocator, ids.len);
+        defer queue.deinit(allocator);
 
-fn loadFeedCache(self: *Self, allocator: Allocator, feed_name: []const u8) !?[]const ItemID {
-    const basename = try std.fmt.allocPrint(allocator, "feed-{s}", .{feed_name});
-    defer allocator.free(basename);
-
-    const filename = try std.fs.path.join(allocator, &.{
-        ".zlacker-cache",
-        basename,
-    });
-    defer allocator.free(filename);
-
-    return self.loadCacheFile(allocator, []const ItemID, filename) catch |err| {
-        if (err == Error.InvalidCacheFile) return null;
-        return err;
-    };
-}
-
-fn loadCacheFile(
-    self: *Self,
-    allocator: Allocator,
-    T: type,
-    filename: []const u8,
-) !?T {
-    const file = std.fs.cwd().openFile(filename, .{}) catch |err| {
-        switch (err) {
-            std.fs.File.OpenError.FileNotFound,
-            std.fs.File.OpenError.BadPathName,
-            => {
-                return Error.InvalidCacheFile;
-            },
-            else => return null,
+        var result: std.ArrayList(Item) = .{};
+        errdefer {
+            for (result.items) |item| item.free(allocator);
+            result.deinit(allocator);
         }
-    };
-    defer file.close();
 
-    var buffer: [1024]u8 = undefined;
-    var reader = file.reader(&buffer);
+        const conn = self.pool.acquire();
+        defer conn.release();
 
-    const stat = try file.stat();
-    if ((std.time.nanoTimestamp() - stat.mtime) > self.cache.expiration_sec * sec_to_nano) {
-        return null;
+        errdefer std.log.err("failed to read item: {s}", .{conn.lastError()});
+
+        const item_stmt = try conn.prepare(
+            \\SELECT
+            \\  id,
+            \\  username,
+            \\  score,
+            \\  title,
+            \\  url,
+            \\  descendants,
+            \\  time,
+            \\  text,
+            \\  deleted,
+            \\  dead,
+            \\  parent_id,
+            \\  thread_id,
+            \\  depth,
+            \\  inserted,
+            \\  (SELECT COUNT(*) FROM hn_item_replies
+            \\    WHERE item_id = hn_items.id)
+            \\FROM hn_items
+            \\WHERE id = ?;
+        );
+        defer item_stmt.deinit();
+
+        const replies_stmt = try conn.prepare(
+            \\SELECT reply_id FROM hn_item_replies
+            \\WHERE item_id = ?;
+        );
+        defer replies_stmt.deinit();
+
+        for (0..ids.len) |i| {
+            queue.appendAssumeCapacity(ids[ids.len - i - 1]);
+        }
+
+        var invalidated = false;
+        const now = std.time.timestamp();
+
+        for (0..ids.len) |idx| {
+            const item_id = ids[idx];
+
+            try item_stmt.reset();
+            try item_stmt.bind(.{item_id});
+
+            if (!try item_stmt.step()) {
+                invalidated = true;
+                break;
+            }
+
+            var item = Item{
+                .id = @intCast(item_stmt.int(0)),
+                .by = item_stmt.text(1),
+                .score = @intCast(item_stmt.int(2)),
+                .title = item_stmt.text(3),
+                .url = item_stmt.nullableText(4),
+                .descendants = @intCast(item_stmt.int(5)),
+                .time = @intCast(item_stmt.int(6)),
+                .text = item_stmt.text(7),
+                .deleted = item_stmt.int(8) != 0,
+                .dead = item_stmt.int(9) != 0,
+                .parent = if (item_stmt.nullableInt(10)) |n| @intCast(n) else null,
+                .thread_id = if (item_stmt.nullableInt(11)) |n| @intCast(n) else null,
+                .depth = @intCast(item_stmt.int(12)),
+                .inserted = @intCast(item_stmt.int(13)),
+            };
+            const num_replies: usize = @intCast(item_stmt.int(14));
+
+            if (now - item.inserted >= expiration_sec) {
+                invalidated = true;
+                break;
+            }
+
+            item = try item.dupe(allocator);
+            errdefer item.free(allocator);
+
+            if (num_replies > 0) {
+                const replies: []ItemID = try allocator.alloc(ItemID, num_replies);
+                errdefer allocator.free(replies);
+
+                try replies_stmt.reset();
+                try replies_stmt.bind(.{item.id});
+
+                var i: usize = 0;
+                while (try replies_stmt.step()) {
+                    replies[i] = @intCast(replies_stmt.int(0));
+                    i += 1;
+                }
+                item.kids = replies;
+            }
+
+            try result.append(allocator, item);
+        }
+
+        if (invalidated) {
+            for (result.items) |item| item.free(allocator);
+            result.deinit(allocator);
+            return null;
+        }
+
+        const items = try result.toOwnedSlice(allocator);
+
+        return items;
     }
 
-    const file_size = stat.size;
-    const data = try allocator.alloc(u8, file_size + 1);
-    defer allocator.free(data);
+    fn readItem(
+        self: @This(),
+        allocator: Allocator,
+        id: ItemID,
+    ) !?Item {
+        const conn = self.pool.acquire();
+        defer conn.release();
+        try conn.busyTimeout(1000);
 
-    data[data.len - 1] = 0;
-    try reader.interface.readSliceAll(data[0..file_size]);
+        errdefer std.log.err("failed to read item: {s}", .{conn.lastError()});
 
-    return std.zon.parse.fromSlice(T, allocator, data[0..file_size :0], null, .{
-        .free_on_error = true,
-    }) catch null;
-}
+        const item_stmt = try conn.row(
+            \\SELECT
+            \\  id,
+            \\  username,
+            \\  score,
+            \\  title,
+            \\  url,
+            \\  descendants,
+            \\  time,
+            \\  text,
+            \\  deleted,
+            \\  dead,
+            \\  parent_id,
+            \\  thread_id,
+            \\  depth,
+            \\  inserted,
+            \\  (SELECT COUNT(*) FROM hn_item_replies
+            \\    WHERE item_id = hn_items.id)
+            \\FROM hn_items
+            \\WHERE id = ?;
+        , .{id}) orelse return null;
+        defer item_stmt.deinit();
 
-fn cacheFeed(allocator: Allocator, feed_name: []const u8, ids: []const ItemID) !void {
-    try std.fs.cwd().makePath(".zlacker-cache");
+        var item = try (Item{
+            .id = @intCast(item_stmt.int(0)),
+            .by = item_stmt.text(1),
+            .score = @intCast(item_stmt.int(2)),
+            .title = item_stmt.text(3),
+            .url = item_stmt.nullableText(4),
+            .descendants = @intCast(item_stmt.int(5)),
+            .time = @intCast(item_stmt.int(6)),
+            .text = item_stmt.text(7),
+            .deleted = item_stmt.int(8) != 0,
+            .dead = item_stmt.int(9) != 0,
+            .parent = if (item_stmt.nullableInt(10)) |n| @intCast(n) else null,
+            .thread_id = if (item_stmt.nullableInt(11)) |n| @intCast(n) else null,
+            .depth = @intCast(item_stmt.int(12)),
+            .inserted = @intCast(item_stmt.int(13)),
+        }).dupe(allocator);
+        errdefer item.free(allocator);
 
-    const basename = try std.fmt.allocPrint(allocator, "feed-{s}", .{feed_name});
-    defer allocator.free(basename);
+        {
+            const num_replies: usize = @intCast(item_stmt.int(14));
+            if (num_replies > 0) {
+                const replies: []ItemID = try allocator.alloc(ItemID, num_replies);
+                errdefer allocator.free(replies);
 
-    const filename = try std.fs.path.join(allocator, &.{
-        ".zlacker-cache",
-        basename,
-    });
-    defer allocator.free(filename);
+                var rows = try conn.rows(
+                    \\SELECT reply_id FROM hn_item_replies
+                    \\WHERE item_id = ?;
+                , .{item.id});
 
-    const file = try std.fs.cwd().createFile(filename, .{});
-    defer file.close();
+                var i: usize = 0;
+                while (rows.next()) |row| {
+                    replies[i] = @intCast(row.int(0));
+                    i += 1;
+                }
+                item.kids = replies;
+            }
+        }
 
-    var buffer: [1024]u8 = undefined;
-    var writer = file.writer(&buffer);
-    var w = &writer.interface;
-
-    try std.zon.stringify.serialize(ids, .{}, w);
-    return w.flush();
-}
-
-fn cacheItem(allocator: Allocator, item: Item) !void {
-    try std.fs.cwd().makePath(".zlacker-cache");
-
-    const basename = try std.fmt.allocPrint(allocator, "item-{d}", .{item.id});
-    defer allocator.free(basename);
-
-    const filename = try std.fs.path.join(allocator, &.{
-        ".zlacker-cache",
-        basename,
-    });
-    defer allocator.free(filename);
-
-    const file = try std.fs.cwd().createFile(filename, .{});
-    defer file.close();
-
-    var buffer: [1024]u8 = undefined;
-    var writer = file.writer(&buffer);
-    var w = &writer.interface;
-
-    try std.zon.stringify.serialize(item, .{}, w);
-    return w.flush();
-}
-
-fn cacheThread(allocator: Allocator, opID: ItemID, items: []const Item) !void {
-    defer std.log.debug("caching thread {d} with {d} items", .{ opID, items.len });
-    try std.fs.cwd().makePath(".zlacker-cache");
-
-    const basename = try std.fmt.allocPrint(allocator, "thread-{d}", .{opID});
-    defer allocator.free(basename);
-
-    const filename = try std.fs.path.join(allocator, &.{
-        ".zlacker-cache",
-        basename,
-    });
-    defer allocator.free(filename);
-
-    var ids: std.ArrayList(ItemID) = try .initCapacity(allocator, items.len);
-    defer ids.deinit(allocator);
-
-    for (items) |item| {
-        ids.appendAssumeCapacity(item.id);
-        cacheItem(allocator, item) catch |err| {
-            std.debug.print("failed to cache thread item: {any}\n", .{err});
-        };
+        return item;
     }
 
-    const file = try std.fs.cwd().createFile(filename, .{});
-    defer file.close();
+    pub fn insertItems(self: @This(), items: []Item) !void {
+        const conn = self.pool.acquire();
+        defer conn.release();
+        try conn.busyTimeout(1000 * 10);
 
-    var buffer: [1024]u8 = undefined;
-    var writer = file.writer(&buffer);
-    var w = &writer.interface;
+        try conn.execNoArgs("PRAGMA journal_mode=WAL2");
+        try conn.transaction();
+        defer conn.commit() catch unreachable;
+        errdefer conn.rollback();
 
-    try std.zon.stringify.serialize(ids.items, .{}, w);
-    return w.flush();
-}
+        const insert_stmt = try conn.prepare(
+            \\INSERT INTO hn_items(
+            \\  id,
+            \\  username,
+            \\  score,
+            \\  title,
+            \\  url,
+            \\  descendants,
+            \\  time,
+            \\  text,
+            \\  deleted,
+            \\  dead,
+            \\  parent_id,
+            \\  thread_id,
+            \\  depth,
+            \\  inserted
+            \\) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            \\ON CONFLICT DO
+            \\UPDATE SET
+            \\ score=excluded.score,
+            \\ title=excluded.title,
+            \\ url=excluded.url,
+            \\ descendants=excluded.descendants,
+            \\ text=excluded.text ,
+            \\ deleted=excluded.deleted ,
+            \\ dead=excluded.dead ,
+            \\ depth=excluded.depth ,
+            \\ inserted=excluded.inserted;
+        );
+        defer insert_stmt.deinit();
+
+        const insert_reply_stmt = try conn.prepare(
+            \\INSERT INTO hn_item_replies(item_id, reply_id)
+            \\VALUES(?, ?);
+        );
+        defer insert_reply_stmt.deinit();
+
+        errdefer {
+            std.log.err("failed to insert items: {s}", .{conn.lastError()});
+        }
+
+        for (items) |item| {
+            try insert_stmt.reset();
+            try insert_stmt.bind(.{
+                item.id,
+                item.by,
+                item.score,
+                item.title,
+                item.url,
+                item.descendants,
+                item.time,
+                item.text,
+                item.deleted,
+                item.dead,
+                item.parent,
+                item.thread_id,
+                item.dead,
+                std.time.timestamp(),
+            });
+            _ = try insert_stmt.step();
+
+            for (item.kids) |reply_id| {
+                try insert_reply_stmt.reset();
+                try insert_reply_stmt.bind(.{ item.id, reply_id });
+                _ = try insert_reply_stmt.step();
+            }
+        }
+    }
+
+    pub fn createDatabase(self: @This()) !void {
+        const conn = self.pool.acquire();
+        defer conn.release();
+        errdefer {
+            std.log.err("failed to create database: {s}", .{conn.lastError()});
+        }
+
+        try conn.execNoArgs(
+            \\CREATE TABLE IF NOT EXISTS hn_feed(
+            \\  feed INTEGER,
+            \\  num INTEGER,
+            \\  item_id INTEGER,
+            \\  inserted INTEGER,
+            \\
+            \\  FOREIGN KEY (item_id) references hn_items(id),
+            \\  UNIQUE (feed, num) ON CONFLICT REPLACE
+            \\);
+            \\
+            \\CREATE TABLE IF NOT EXISTS hn_item_replies(
+            \\  item_id INTEGER,
+            \\  reply_id INTEGER,
+            \\
+            \\  FOREIGN KEY (item_id) references hn_items(id)
+            \\    ON DELETE CASCADE,
+            \\  UNIQUE (item_id, reply_id) ON CONFLICT IGNORE
+            \\);
+            \\
+            \\CREATE TABLE IF NOT EXISTS hn_items(
+            \\  id INTEGER PRIMARY KEY,
+            \\  username VARCHAR(16),
+            \\  score INTEGER,
+            \\  title VARCHAR(100),
+            \\  url TEXT,
+            \\  descendants INTEGER,
+            \\  time INTEGER,
+            \\  text TEXT,
+            \\  deleted TINYINT,
+            \\  dead TINYINT,
+            \\  parent_id INTEGER,
+            \\  thread_id INTEGER,
+            \\  depth INTEGER,
+            \\  inserted INTEGER,
+            \\
+            \\  FOREIGN KEY (parent_id) references hn_items(id)
+            \\  FOREIGN KEY (thread_id) references hn_items(id)
+            \\);
+        );
+    }
+
+    pub fn startCleaner(self: @This()) !void {
+        const Instance = @This();
+        const thread = try std.Thread.spawn(.{}, struct {
+            fn loop(db: Instance) void {
+                while (true) {
+                    std.log.debug("removing old items", .{});
+                    db.removePastLimit() catch |err| {
+                        std.log.err("failed to remove old items: {any}", .{err});
+                    };
+                    std.Thread.sleep(1e9 * 60 * 30);
+                }
+            }
+        }.loop, .{self});
+
+        thread.detach();
+    }
+
+    pub fn removePastLimit(self: @This()) !void {
+        const conn = self.pool.acquire();
+        defer conn.release();
+        errdefer std.log.err("{s}", .{conn.lastError()});
+
+        const row = try conn.row(
+            \\ SELECT inserted FROM hn_items
+            \\ ORDER BY inserted DESC
+            \\ LIMIT ? OFFSET ?;
+        , .{ items_limit, items_limit }) orelse return;
+        defer row.deinit();
+
+        const inserted: ItemID = @intCast(row.int(0));
+
+        try conn.exec(
+            \\ DELETE FROM hn_items
+            \\ WHERE inserted < ?;
+        , .{inserted});
+    }
+};
 
 fn printStackTrace(trace_arg: ?*std.builtin.StackTrace) void {
     const trace = trace_arg orelse return;
@@ -844,7 +1155,7 @@ fn printStackTrace(trace_arg: ?*std.builtin.StackTrace) void {
     ) catch {};
 }
 
-test {
+test "fetch 1" {
     var ts_allocator: std.heap.ThreadSafeAllocator = .{
         .child_allocator = std.testing.allocator,
     };
@@ -865,7 +1176,7 @@ test {
     hn.waitBackgroundTasks();
 }
 
-test {
+test "fetch:index" {
     var ts_allocator: std.heap.ThreadSafeAllocator = .{
         .child_allocator = std.testing.allocator,
     };
@@ -874,7 +1185,7 @@ test {
     var hn: Self = try .init(allocator);
     defer hn.deinit(allocator);
 
-    const story_ids = try hn.fetchTopStoryIDs(allocator);
+    const story_ids = try hn.fetchTopStoryIDs(allocator, 30, 0);
     defer allocator.free(story_ids);
 
     const items: []const Item = try hn.fetchAllItems(allocator, story_ids[0..1]);
@@ -918,17 +1229,3 @@ test fetchThread {
     }
     std.debug.print("total num items: {d}\n", .{count});
 }
-
-// TODO: I can't write the whole thread-12831823 file
-// since accessing the sub-threads will create a whole
-// new different file, which will result in a large disk usage,
-// it's better to write individual item files
-
-// TODO: use sqlite since concurrent file reading/writing
-// isn't good/safe
-// or not, not worth the dependency?
-// if the cache file is corrupted, then just refetch, no biggie
-
-// TODO: a background task that removes stale old cache files
-// to prevent disk usage build up
-// hn.startDeleteStaleCache

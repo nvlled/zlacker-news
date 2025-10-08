@@ -44,6 +44,10 @@
             .url = "git+https://github.com/rockorager/zeit#ade14edb2025f5e4a57b683f81c915f70a904e88",
             .hash = "zeit-0.6.0-5I6bk7V8AgAY0-hM-vUYtKZUFYhXct-VRkqISNNTfEfb",
         },
+        .zqlite = .{
+            .url = "git+https://github.com/karlseguin/zqlite.zig?ref=master#74e661633ffe04fadc214ad07857633fa339f79c",
+            .hash = "zqlite-0.0.0-RWLaY81-lQAbR_uUQJeKmTzYi16C9Zvl-BjrBOavQfeK",
+        },
     },
     .paths = .{
         "build.zig",

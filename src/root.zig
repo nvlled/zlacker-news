@@ -63,7 +63,7 @@ pub fn startServer() !void {
     var hn: HN = try .init(allocator);
     defer hn.deinit(allocator);
 
-    try hn.startStaleCacheRemover(allocator);
+    try hn.db.startCleaner();
 
     const port = 8000;
     var server = try httpz.Server(Handler).init(allocator, .{
@@ -118,14 +118,13 @@ const Controllers = struct {
         const page_num = if (query.get("page")) |p| std.fmt.parseInt(u8, p, 10) catch 0 else 0;
         const allocator = ctx.allocator;
 
-        const all_ids = try ctx.hn.fetchTopStoryIDs(allocator);
-        defer allocator.free(all_ids);
-
         const page_size: usize = 30;
         const i = page_num * page_size;
-        const selected_ids = all_ids[i..@min(i + page_size, all_ids.len)];
 
-        const items = try ctx.hn.fetchAllItems(allocator, selected_ids);
+        const ids = try ctx.hn.fetchTopStoryIDs(allocator, page_size, i);
+        defer allocator.free(ids);
+
+        const items = try ctx.hn.fetchAllItems(allocator, ids);
         defer HN.freeItems(allocator, items);
 
         ctx.res.header("Content-Type", "text/html");
@@ -156,81 +155,85 @@ const Controllers = struct {
     }
 };
 
-test {
+test "routes:index" {
     const allocator = std.testing.allocator;
 
-    {
-        var wt = httpz.testing.init(.{});
-        defer wt.deinit();
+    var wt = httpz.testing.init(.{});
+    defer wt.deinit();
 
-        var hn: HN = try .init(allocator);
-        defer hn.deinit(allocator);
+    var hn: HN = try .init(allocator);
+    defer hn.deinit(allocator);
 
-        var zhtml: Zhtml = try .init(wt.res.writer(), allocator);
-        defer zhtml.deinit(allocator);
+    var zhtml: Zhtml = try .init(wt.res.writer(), allocator);
+    defer zhtml.deinit(allocator);
 
-        var ctx: RequestContext = .{
-            .hn = &hn,
-            .zhtml = &zhtml,
-            .req = wt.req,
-            .res = wt.res,
-            .allocator = allocator,
-        };
-        try Controllers.index(&ctx);
-        try wt.expectStatus(200);
-        std.debug.print("test output for \"{s}\":\n{s}\n\n", .{ "/", try wt.getBody() });
-    }
+    var ctx: RequestContext = .{
+        .hn = &hn,
+        .zhtml = &zhtml,
+        .req = wt.req,
+        .res = wt.res,
+        .allocator = allocator,
+    };
+    try Controllers.index(&ctx);
+    try wt.expectStatus(200);
+    std.debug.print("test output for \"{s}\":\n{s}\n\n", .{ "/", try wt.getBody() });
+}
 
-    {
-        var wt = httpz.testing.init(.{});
-        defer wt.deinit();
+test "routes:item" {
+    const allocator = std.testing.allocator;
+    var wt = httpz.testing.init(.{});
+    defer wt.deinit();
 
-        var hn: HN = try .init(allocator);
-        defer hn.deinit(allocator);
+    var hn: HN = try .init(allocator);
+    defer hn.deinit(allocator);
 
-        var zhtml: Zhtml = try .init(wt.res.writer(), allocator);
-        defer zhtml.deinit(allocator);
+    var zhtml: Zhtml = try .init(wt.res.writer(), allocator);
+    defer zhtml.deinit(allocator);
 
-        var ctx: RequestContext = .{
-            .hn = &hn,
-            .zhtml = &zhtml,
-            .req = wt.req,
-            .res = wt.res,
-            .allocator = allocator,
-        };
+    var ctx: RequestContext = .{
+        .hn = &hn,
+        .zhtml = &zhtml,
+        .req = wt.req,
+        .res = wt.res,
+        .allocator = allocator,
+    };
 
-        const q = try wt.req.query();
-        q.add("id", "1727731");
-        try Controllers.item(&ctx);
-        try wt.expectStatus(200);
-        std.debug.print("test output for \"{s}\":\n{s}\n\n", .{ "/item", try wt.getBody() });
-    }
+    const q = try wt.req.query();
+    q.add("id", "1727731");
+    try Controllers.item(&ctx);
+    try wt.expectStatus(200);
+    std.debug.print("test output for \"{s}\":\n{s}\n\n", .{ "/item", try wt.getBody() });
+}
 
-    {
-        var wt = httpz.testing.init(.{});
-        defer wt.deinit();
+test "routes:assets" {
+    const allocator = std.testing.allocator;
+    var wt = httpz.testing.init(.{});
+    defer wt.deinit();
 
-        var hn: HN = try .init(allocator);
-        defer hn.deinit(allocator);
+    var hn: HN = try .init(allocator);
+    defer hn.deinit(allocator);
 
-        var zhtml: Zhtml = try .init(wt.res.writer(), allocator);
-        defer zhtml.deinit(allocator);
+    var zhtml: Zhtml = try .init(wt.res.writer(), allocator);
+    defer zhtml.deinit(allocator);
 
-        var ctx: RequestContext = .{
-            .hn = &hn,
-            .zhtml = &zhtml,
-            .req = wt.req,
-            .res = wt.res,
-            .allocator = allocator,
-        };
+    var ctx: RequestContext = .{
+        .hn = &hn,
+        .zhtml = &zhtml,
+        .req = wt.req,
+        .res = wt.res,
+        .allocator = allocator,
+    };
 
-        ctx.req.url = .parse("/assets/script.js");
+    ctx.req.url = .parse("/assets/script.js");
 
-        try Controllers.assets(&ctx);
-        try wt.expectStatus(200);
-        std.debug.print("test output for \"{s}\":\n{s}\n\n", .{
-            "/assets/script.js",
-            try wt.getBody(),
-        });
-    }
+    try Controllers.assets(&ctx);
+    try wt.expectStatus(200);
+    std.debug.print("test output for \"{s}\":\n{s}\n\n", .{
+        "/assets/script.js",
+        try wt.getBody(),
+    });
+}
+
+test {
+    std.testing.refAllDeclsRecursive(@This());
 }

@@ -1,8 +1,10 @@
 
 body {
-	max-width: 1000px;
+	max-width: 70ch;
 	background: #022;
 	color: #eee;
+	font-family: system-ui;
+	line-height: 1.5;
 }
 
 h1 > a,
@@ -14,7 +16,7 @@ h4 > a
 	color: #077;
 }
 
- a {
+a {
 	color: #077;
 }
 
@@ -70,13 +72,4 @@ a.replink {
 	.depth-13 { width: 60px; }
 	.depth-14 { width: 65px; }
 	.depth-15 { width: 70px; }
-}
-
-
-
-
-#feed-page {
-	a.item-link {
-
-	}
 }

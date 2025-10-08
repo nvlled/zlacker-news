@@ -7,7 +7,7 @@ const std = @import("std");
 // build runner to parallelize the build automatically (and the cache system to
 // know when a step doesn't need to be re-run).
 pub fn build(b: *std.Build) void {
-    const test_filter = b.option([]const u8, "test", "run only test that matches filter");
+    const test_filters = b.option([]const []const u8, "test-filter", "run only test that matches filter") orelse &[0][]const u8{};
 
     // Standard target options allow the person running `zig build` to choose
     // what target to build for. Here we do not override the defaults, which
@@ -22,6 +22,11 @@ pub fn build(b: *std.Build) void {
     // of this build script using `b.option()`. All defined flags (including
     // target and optimize options) will be listed when running `zig build --help`
     // in this directory.
+
+    const zqlite = b.dependency("zqlite", .{
+        .target = target,
+        .optimize = optimize,
+    });
 
     const zhtml = b.dependency("zhtml", .{
         .target = target,
@@ -53,13 +58,13 @@ pub fn build(b: *std.Build) void {
             .{ .name = "zhtml", .module = zhtml.module("zhtml") },
             .{ .name = "zeit", .module = zeit.module("zeit") },
             .{ .name = "httpz", .module = httpz.module("httpz") },
+            .{ .name = "zqlite", .module = zqlite.module("zqlite") },
         },
     });
 
     // Here we define an executable. An executable needs to have a root module
     // which needs to expose a `main` function. While we could add a main function
-    // to the module defined above, it's sometimes preferable to split business
-    // business logic and the CLI into two separate modules.
+    // to the module defined above, it's sometimes preferable to split business // business logic and the CLI into two separate modules.
     //
     // If your goal is to create a Zig library for others to use, consider if
     // it might benefit from also exposing a CLI tool. A parser library for a
@@ -98,6 +103,8 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
+    exe.linkLibC();
+
     // This declares intent for the executable to be installed into the
     // install prefix when running `zig build` (i.e. when executing the default
     // step). By default the install prefix is `zig-out/` but can be overridden
@@ -128,7 +135,7 @@ pub fn build(b: *std.Build) void {
     // set the releative field.
     const mod_tests = b.addTest(.{
         .root_module = mod,
-        .filters = if (test_filter) |filter| &.{filter} else &.{},
+        .filters = test_filters,
     });
 
     // A run step that will run the test executable.
@@ -139,6 +146,7 @@ pub fn build(b: *std.Build) void {
     // hence why we have to create two separate ones.
     const exe_tests = b.addTest(.{
         .root_module = exe.root_module,
+        .filters = test_filters,
     });
 
     // A run step that will run the second test executable.

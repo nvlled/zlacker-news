@@ -53,8 +53,9 @@ pub fn render(ctx: *RequestContext, data: Data) !void {
             const name = try encodeName(arena, op, op.id);
             try z.print(
                 arena,
-                "submitted by {s} on {s} | {d} points {d} comments",
+                "{d} | submitted by {s} on {s} | {d} points {d} comments",
                 .{
+                    op.id,
                     name,
                     dt,
                     op.score,
@@ -111,9 +112,10 @@ pub fn render(ctx: *RequestContext, data: Data) !void {
                     z.div.render("");
 
                     const name = try encodeName(arena, item, replyLink.base_id);
-                    try z.print(arena, "{d}. {s}", .{
+                    try z.print(arena, "{d}. {s} {d}", .{
                         n + 1,
                         name,
+                        item.id,
                     });
                     arena.free(name);
 
@@ -252,7 +254,10 @@ fn encodeName(arena: Allocator, item: HN.Item, base_id: u64) ![]const u8 {
     if (item.id == base_id) {
         return sprintf(arena, "{s}+(OP)", .{by});
     }
-    const id = try encodeID(arena, item.id - base_id);
+
+    // huh for some really strange reason, some items has an id < than parent or ancestor id
+    // why does that happen? Maybe it's a post that was moved from elsewhere.
+    const id = try encodeID(arena, if (item.id >= base_id) item.id - base_id else item.id);
     defer arena.free(id);
     return sprintf(arena, "{s}+{s}", .{ by, id });
 }
