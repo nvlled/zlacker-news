@@ -528,9 +528,7 @@ pub fn fetchThread(self: *Self, allocator: Allocator, opID: ItemID) ![]const Ite
     };
 
     std.log.debug("fetched thread {d}: got {d} items", .{ opID, items.len });
-
-    std.sort.block(Item, items, {}, compareItem);
-
+    std.sort.block(Item, @constCast(items), {}, compareItem);
     try self.db.insertItems(items);
 
     return items;
@@ -573,7 +571,7 @@ fn dupeItems(allocator: Allocator, items: []const Item) ![]const Item {
 const DB = struct {
     pool: *zqlite.Pool,
 
-    const expiration_sec: i128 = if (builtin.mode == .Debug) 8 * 60 * 60 else 10 * 60;
+    const expiration_sec: i128 = if (builtin.mode == .Debug) 8 * 60 * 60 else 15 * 60;
     const items_limit: usize = 1e4 * 50;
     const db_filename = "zlacker.db";
 
@@ -770,11 +768,7 @@ const DB = struct {
 
         const items = try result.toOwnedSlice(allocator);
 
-        std.sort.block(Item, @constCast(items), {}, struct {
-            fn _(_: void, a: Item, b: Item) bool {
-                return a.id < b.id;
-            }
-        }._);
+        std.sort.block(Item, @constCast(items), {}, compareItem);
 
         return items;
     }

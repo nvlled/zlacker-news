@@ -36,6 +36,7 @@ pub fn begin(self: @This(), attrs: Attrs) !void {
 
     z.h1.@"<>"();
     z.a.attr(.href, "/");
+    z.a.attr(.id, "top");
     z.a.render("zlacker");
     z.h1.@"</>"();
 }

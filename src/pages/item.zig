@@ -53,9 +53,8 @@ pub fn render(ctx: *RequestContext, data: Data) !void {
             const name = try encodeName(arena, op, op.id);
             try z.print(
                 arena,
-                "{d} | submitted by {s} on {s} | {d} points {d} comments",
+                "submitted by {s} on {s} | {d} points {d} comments",
                 .{
-                    op.id,
                     name,
                     dt,
                     op.score,
@@ -70,7 +69,8 @@ pub fn render(ctx: *RequestContext, data: Data) !void {
                 z.a.attr(.href, url);
                 z.a.render("[view article]");
             }
-            z.a.attr(.id, "top");
+            try z.a.attrf(arena, .href, "https://news.ycombinator.com/item?id={d}", .{op.id});
+            z.a.render("[source]");
             z.a.attr(.href, "#bottom");
             z.a.render("[go to bottom]");
 
@@ -112,15 +112,16 @@ pub fn render(ctx: *RequestContext, data: Data) !void {
                     z.div.render("");
 
                     const name = try encodeName(arena, item, replyLink.base_id);
-                    try z.print(arena, "{d}. {s} {d}", .{
+                    try z.print(arena, "{d}. {s}", .{
                         n + 1,
                         name,
-                        item.id,
                     });
                     arena.free(name);
 
                     try z.a.attrf(arena, .href, "/item?id={d}", .{item.id});
                     z.a.render("[link]");
+                    try z.a.attrf(arena, .href, "https://news.ycombinator.com/item?id={d}", .{item.id});
+                    z.a.render("[source]");
 
                     const dt = try formatDateTime(arena, item.time);
                     z.span.render(dt);
@@ -179,6 +180,7 @@ pub fn render(ctx: *RequestContext, data: Data) !void {
                 z.small.@"</>"();
 
                 if (item.kids.len > 0) {
+                    z.span.attr(.class, "reply-links");
                     z.span.@"<>"();
                     for (item.kids) |rep_id| {
                         z.small.@"<>"();
