@@ -61,6 +61,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "zqlite", .module = zqlite.module("zqlite") },
         },
     });
+    mod.linkSystemLibrary("sqlite3", .{});
 
     // Here we define an executable. An executable needs to have a root module
     // which needs to expose a `main` function. While we could add a main function
