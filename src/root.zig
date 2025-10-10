@@ -11,7 +11,9 @@ const Action = *const fn (*RequestContext) anyerror!void;
 
 const Handler = struct {
     allocator: std.mem.Allocator,
+    thread_pool: *std.Thread.Pool,
     hn: *HN,
+
     pub fn dispatch(app: *const Handler, action: Action, req: *httpz.Request, res: *httpz.Response) !void {
         var zhtml: Zhtml = try .init(res.writer(), res.arena);
         defer {
@@ -25,6 +27,7 @@ const Handler = struct {
             .req = req,
             .res = res,
             .allocator = app.allocator,
+            .thread_pool = app.thread_pool,
         };
 
         std.debug.print("[request] {s}\n", .{req.url.raw});
@@ -65,6 +68,12 @@ pub fn startServer() !void {
 
     try hn.db.startCleaner();
 
+    var tpool: std.Thread.Pool = undefined;
+    try tpool.init(.{
+        .allocator = allocator,
+    });
+    defer tpool.deinit();
+
     const port = 8000;
     var server = try httpz.Server(Handler).init(allocator, .{
         .address = "0.0.0.0",
@@ -73,6 +82,7 @@ pub fn startServer() !void {
             .request = 1000,
         },
     }, .{
+        .thread_pool = &tpool,
         .allocator = allocator,
         .hn = &hn,
     });

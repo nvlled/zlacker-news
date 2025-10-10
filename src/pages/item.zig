@@ -6,11 +6,24 @@ const HN = @import("../hn.zig");
 const Zhtml = @import("zhtml");
 const Layout = @import("./layout.zig");
 const RequestContext = @import("../context.zig");
+const rrrr = @import("rrrr");
 
 pub const Data = struct {
     items: []const HN.Item,
     item_lookup: *std.AutoHashMapUnmanaged(HN.ItemID, HN.Item),
 };
+
+const hn_link: rrrr.Regex = .concat(&.{
+    &.literal(
+        \\<a href="https:&#x2F;&#x2F;news.ycombinator.com&#x2F;item?id=
+    ),
+    &.capture(&.oneOrMore(&.digit)),
+    &.literal(
+        \\">
+    ),
+    &.@"oneOrMore?"(&.exceptChar("<>")),
+    &.literal("</a>"),
+});
 
 pub fn render(ctx: *RequestContext, data: Data) !void {
     const z = ctx.zhtml;
@@ -171,7 +184,21 @@ pub fn render(ctx: *RequestContext, data: Data) !void {
                     z.br.@"<>"();
                 }
             }
-            z.@"writeUnsafe!?"(item.text);
+
+            {
+                var link_search = try hn_link.searchAll(ctx.allocator, item.text, .{});
+                defer link_search.deinit(ctx.allocator);
+
+                while (link_search.next(ctx.allocator)) |m| {
+                    z.@"writeUnsafe!?"(link_search.skippedString(item.text));
+                    if (m.capture) |cap| {
+                        try z.a.attrf(arena, .href, "/item?id={s}", .{cap.string(item.text)});
+                        z.a.render(cap.string(item.text));
+                    }
+                }
+                z.@"writeUnsafe!?"(link_search.skippedString(item.text));
+            }
+
             z.div.@"</>"();
 
             if (item.kids.len > 0) {
@@ -214,6 +241,13 @@ const ReplyLink = struct {
         class,
     };
 
+    const tag_re: rrrr.Regex = .concat(&.{
+        &.literal("<"),
+        &.optional(&.literal("/")),
+        &.@"oneOrMore?"(&.exceptChar("<>")),
+        &.literal(">"),
+    });
+
     pub fn attr(self: *@This(), key: AttrEnum, value: []const u8) void {
         switch (key) {
             .class => self.class = value,
@@ -232,15 +266,15 @@ const ReplyLink = struct {
         const name = try encodeName(arena, item, self.base_id);
         defer arena.free(name);
 
+        var title = item.text;
+        title = try tag_re.replaceAll(arena, title, "~", .{});
+
         z.a.attrs(.{
             .href = try sprintf(arena, "#{d}", .{item.id}),
             .class = try sprintf(arena, "replink {s}", .{
                 self.class,
             }),
-            .title = if (item.text.len < 200)
-                item.text
-            else
-                try sprintf(arena, "{s}...", .{item.text[0..200]}),
+            .title = title[0..@min(256, title.len)],
         });
 
         z.a.@"<>"();
