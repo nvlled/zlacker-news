@@ -94,7 +94,6 @@ pub fn render(ctx: *RequestContext, data: Data) !void {
             }
         }
         z.div.@"</>"();
-        z.br.@"<>"();
     } else {
         z.div.@"<>"();
         try z.a.attrf(arena, .href, "/item?id={d}", .{op.parent.?});
@@ -105,6 +104,23 @@ pub fn render(ctx: *RequestContext, data: Data) !void {
             try z.print(arena, " {d} comments", .{items.len - 1});
         }
         z.div.@"</>"();
+    }
+
+    if (op.kids.len > 0) {
+        z.small.@"<>"();
+        try z.print(arena, "replies({d}): ", .{op.kids.len});
+        z.small.@"</>"();
+
+        z.span.attr(.class, "reply-links");
+        z.span.@"<>"();
+        for (op.kids) |rep_id| {
+            z.small.@"<>"();
+            replyLink.attr(.class, "resp");
+            try replyLink.render(arena, lookup.get(rep_id));
+            z.write(" ");
+            z.small.@"</>"();
+        }
+        z.span.@"</>"();
     }
 
     const start: usize = if (items[0].parent != null) 0 else 1;
@@ -193,7 +209,7 @@ pub fn render(ctx: *RequestContext, data: Data) !void {
                     z.@"writeUnsafe!?"(link_search.skippedString(item.text));
                     if (m.capture) |cap| {
                         try z.a.attrf(arena, .href, "/item?id={s}", .{cap.string(item.text)});
-                        z.a.render(cap.string(item.text));
+                        try z.a.renderf(arena, ">>{s}", .{cap.string(item.text)});
                     }
                 }
                 z.@"writeUnsafe!?"(link_search.skippedString(item.text));
@@ -206,21 +222,18 @@ pub fn render(ctx: *RequestContext, data: Data) !void {
                 try z.print(arena, "replies({d}): ", .{item.kids.len});
                 z.small.@"</>"();
 
-                if (item.kids.len > 0) {
-                    z.span.attr(.class, "reply-links");
-                    z.span.@"<>"();
-                    for (item.kids) |rep_id| {
-                        z.small.@"<>"();
-                        replyLink.attr(.class, "resp");
-                        try replyLink.render(arena, lookup.get(rep_id));
-                        z.write(" ");
-                        z.small.@"</>"();
-                    }
-                    z.span.@"</>"();
+                z.span.attr(.class, "reply-links");
+                z.span.@"<>"();
+                for (item.kids) |rep_id| {
+                    z.small.@"<>"();
+                    replyLink.attr(.class, "resp");
+                    try replyLink.render(arena, lookup.get(rep_id));
+                    z.write(" ");
+                    z.small.@"</>"();
                 }
+                z.span.@"</>"();
             }
         }
-
         z.div.@"</>"();
     }
     z.a.attr(.id, "bottom");
@@ -274,7 +287,7 @@ const ReplyLink = struct {
             .class = try sprintf(arena, "replink {s}", .{
                 self.class,
             }),
-            .title = title[0..@min(256, title.len)],
+            .title = title[0..@min(300, title.len)],
         });
 
         z.a.@"<>"();
