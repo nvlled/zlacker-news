@@ -67,18 +67,23 @@ a.replink {
 		);
 	}
 
-	.depth-2 { width: 5px; }
-	.depth-3 { width: 10px; }
-	.depth-4 { width: 15px; }
-	.depth-5 { width: 20px; }
-	.depth-6 { width: 25px; }
-	.depth-7 { width: 30px; }
-	.depth-8 { width: 35px; }
-	.depth-9 { width: 40px; }
-	.depth-10 { width: 45px; }
-	.depth-11 { width: 50px; }
-	.depth-12 { width: 55px; }
-	.depth-13 { width: 60px; }
-	.depth-14 { width: 65px; }
-	.depth-15 { width: 70px; }
+	.depth-1  { width: 10px; }
+	.depth-2  { width: 20px; }
+	.depth-3  { width: 30px; }
+	.depth-4  { width: 40px; }
+	.depth-5  { width: 50px; }
+	.depth-6  { width: 60px; }
+	.depth-7  { width: 70px; }
+	.depth-8  { width: 80px; }
+	.depth-9  { width: 90px; }
+	.depth-10 { width: 100px; }
+	.depth-11 { width: 120px; }
+	.depth-12 { width: 130px; }
+	.depth-13 { width: 140px; }
+	.depth-14 { width: 150px; }
+	.depth-15 { width: 160px; }
+	.depth-16 { width: 170px; }
+	.depth-17 { width: 180px; }
+	.depth-18 { width: 190px; }
+	.depth-19 { width: 200px; }
 }

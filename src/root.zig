@@ -95,6 +95,7 @@ pub fn startServer() !void {
 
     router.get("/", Controllers.index, .{});
     router.get("/item", Controllers.item, .{});
+    router.get("/item/discussion", Controllers.discussion, .{});
     router.get("/assets/*", Controllers.assets, .{});
 
     std.debug.print("server running at localhost:{d}\n", .{port});
@@ -166,10 +167,44 @@ const Controllers = struct {
         }
 
         var lookup: std.AutoHashMapUnmanaged(HN.ItemID, HN.Item) = .{};
-        try HN.fillItems(ctx.res.arena, @constCast(items), &lookup);
+        defer lookup.deinit(allocator);
+        try HN.fillItems(allocator, @constCast(items), &lookup);
 
         ctx.res.header("Content-Type", "text/html");
-        try @import("./pages/item.zig").render(ctx, .{ .items = items, .item_lookup = &lookup });
+        try @import("./pages/item.zig").render(ctx, .{
+            .items = items,
+            .item_lookup = &lookup,
+            .discussion_mode = false,
+        });
+    }
+
+    fn discussion(ctx: *RequestContext) !void {
+        const allocator = ctx.allocator;
+        const query = try ctx.req.query();
+        const thread_id = if (query.get("tid")) |p| std.fmt.parseInt(HN.ItemID, p, 10) catch {
+            return error.InvalidID;
+        } else {
+            return error.@"Need an tid (thread id)";
+        };
+        const item_id = if (query.get("id")) |p| std.fmt.parseInt(HN.ItemID, p, 10) catch {
+            return error.InvalidID;
+        } else {
+            return error.@"Need an id (item id)";
+        };
+
+        const items = try ctx.hn.fetchDiscussion(allocator, thread_id, item_id);
+        defer HN.freeItems(allocator, items);
+
+        var lookup: std.AutoHashMapUnmanaged(HN.ItemID, HN.Item) = .{};
+        defer lookup.deinit(allocator);
+        try HN.fillItems(allocator, @constCast(items), &lookup);
+
+        ctx.res.header("Content-Type", "text/html");
+        try @import("./pages/item.zig").render(ctx, .{
+            .items = items,
+            .item_lookup = &lookup,
+            .discussion_mode = true,
+        });
     }
 };
 

@@ -414,6 +414,41 @@ pub fn fetchThreadAlgolia(self: *Self, allocator: Allocator, opID: ItemID) ![]It
     return try result.toOwnedSlice(allocator);
 }
 
+// /item?id=123
+// /item/discussion?id=123&tid=456
+
+/// Caller must call Item.free() for each item and the free the slice itself
+pub fn fetchLineage(_: *Self, allocator: Allocator, item_id: ItemID) ![]Item {
+    std.log.debug("fetching discussion {d} from HN official API", .{item_id});
+    var result: std.ArrayList(Item) = .{};
+    defer result.deinit(allocator);
+    errdefer {
+        for (result.items) |item| {
+            item.free(allocator);
+        }
+    }
+
+    var current = item_id;
+    while (true) {
+        const item = try fetchItem(allocator, current);
+        if (item.parent != null)
+            try result.append(allocator, item);
+        current = item.parent orelse break;
+    }
+
+    const items: []Item = result.toOwnedSlice(allocator);
+    std.mem.reverse(Item, items);
+
+    for (items[1..], 0..) |*item, i| {
+        _ = i;
+        allocator.free(item.kids);
+        item.kids = &.{};
+        //item.kids = allocator.dupe(Item, &.{items[i - 1].id});
+    }
+
+    return items;
+}
+
 /// Caller must call Item.free() for each item and the free the slice itself
 /// Uses the official HN API. About at least two times slower compared
 /// to fetchThreadAlgolia() since this once makes recursive HTTP requests
@@ -529,6 +564,41 @@ pub fn fetchThreadOfficial(self: *Self, allocator: Allocator, opID: ItemID) ![]I
 
 // Caller must call Item.free() for each item and the free the slice itself
 // Uses the Algolia API, then falls back to official HN API if it fails.
+pub fn fetchDiscussion(
+    self: *Self,
+    allocator: Allocator,
+    thread_id: ItemID,
+    item_id: ItemID,
+) ![]const Item {
+    std.log.debug("fetching discussion {d}", .{item_id});
+    errdefer std.log.debug("failed to discussion thread {d}", .{item_id});
+
+    var cached_items = try self.db.readDiscussion(allocator, item_id);
+    if (cached_items) |items| {
+        std.log.debug("fetched cached discussion {d}: found {d} items", .{ item_id, items.len });
+        return items;
+    }
+
+    // thread is not yet loaded, try to fetch it
+    // TODO: ideally I should use the items from fetchThread
+    // but I'll read again from db anyways for lazy reasons
+    const temp_items: []const Item = try self.fetchThread(allocator, thread_id, .{});
+    std.debug.print("huh: {d}\n", .{temp_items.len});
+    freeItems(allocator, temp_items);
+
+    // try again
+    cached_items = try self.db.readDiscussion(allocator, item_id);
+    if (cached_items) |items| {
+        std.log.debug("fetched cached discussion {d}: found {d} items", .{ item_id, items.len });
+        return items;
+    }
+
+    // still didn't find any, oh well
+    return &.{};
+}
+
+// Caller must call Item.free() for each item and the free the slice itself
+// Uses the Algolia API, then falls back to official HN API if it fails.
 pub fn fetchThread(
     self: *Self,
     allocator: Allocator,
@@ -554,6 +624,7 @@ pub fn fetchThread(
             };
         };
     };
+    std.sort.block(Item, @constCast(items), {}, compareItem);
 
     std.log.debug("fetched thread {d}: got {d} items", .{ opID, items.len });
 
@@ -696,9 +767,6 @@ const DB = struct {
         allocator: Allocator,
         op_id: ItemID,
     ) !?[]const Item {
-        var queue: std.ArrayList(ItemID) = .{};
-        defer queue.deinit(allocator);
-
         var result: std.ArrayList(Item) = .{};
         errdefer {
             for (result.items) |item| item.free(allocator);
@@ -763,7 +831,7 @@ const DB = struct {
 
             if (now - item.inserted >= expiration_sec) {
                 std.log.debug("thread cached expired: {d}", .{op_id});
-                for (result.items) |x| x.free(allocator);
+                for (result.items) |entry| entry.free(allocator);
                 result.deinit(allocator);
                 return null;
             }
@@ -798,6 +866,82 @@ const DB = struct {
         std.mem.reverse(Item, items);
 
         return items;
+    }
+
+    pub fn readDiscussion(
+        self: @This(),
+        allocator: Allocator,
+        item_id: ItemID,
+    ) !?[]const Item {
+        var result: std.ArrayList(Item) = .{};
+        errdefer {
+            for (result.items) |item| item.free(allocator);
+            result.deinit(allocator);
+        }
+
+        const conn = self.pool.acquire();
+        defer conn.release();
+
+        errdefer std.log.err("failed to read item: {s}", .{conn.lastError()});
+
+        var rows = try conn.rows(
+            \\WITH RECURSIVE
+            \\    thread( id, username, score, title, url, descendants, time, text,
+            \\            deleted, dead, parent_id, thread_id, depth, inserted
+            \\    ) AS (
+            \\        SELECT
+            \\            id,
+            \\            username, score, title, url, descendants, time, text,
+            \\            deleted, dead, parent_id, thread_id, depth, inserted
+            \\        FROM hn_items WHERE id = ?
+            \\        UNION
+            \\        SELECT
+            \\            t.id, t.username, t.score, t.title, t.url, t.descendants, t.time, t.text,
+            \\            t.deleted, t.dead, t.parent_id, t.thread_id, t.depth, t.inserted
+            \\          FROM hn_items t JOIN thread
+            \\          ON t.id = thread.parent_id
+            \\    )
+            \\SELECT * from thread ORDER BY id;
+        , .{item_id});
+        defer rows.deinit();
+
+        const now = std.time.timestamp();
+        while (rows.next()) |row| {
+            var item = Item{
+                .id = @intCast(row.int(0)),
+                .by = row.text(1),
+                .score = @intCast(row.int(2)),
+                .title = row.text(3),
+                .url = row.nullableText(4),
+                .descendants = @intCast(row.int(5)),
+                .time = @intCast(row.int(6)),
+                .text = row.text(7),
+                .deleted = row.int(8) != 0,
+                .dead = row.int(9) != 0,
+                .parent = if (row.nullableInt(10)) |n| @intCast(n) else null,
+                .thread_id = if (row.nullableInt(11)) |n| @intCast(n) else null,
+                .depth = @intCast(row.int(12)),
+                .inserted = @intCast(row.int(13)),
+            };
+
+            if (now - item.inserted >= expiration_sec) {
+                std.log.debug("discussion cached expired: {d}", .{item_id});
+                for (result.items) |entry| entry.free(allocator);
+                result.deinit(allocator);
+                return null;
+            }
+
+            item = try item.dupe(allocator);
+            errdefer item.free(allocator);
+
+            try result.append(allocator, item);
+        }
+
+        if (result.items.len == 0) {
+            return null;
+        }
+
+        return try result.toOwnedSlice(allocator);
     }
 
     pub fn readItems(
@@ -1197,6 +1341,36 @@ test fetchThread {
     defer hn.deinit(allocator);
 
     const items = try hn.fetchThread(allocator, 1727731, .{});
+    defer freeItems(allocator, items);
+
+    var count: usize = 0;
+    for (items) |item| {
+        std.debug.print("> {d} {s} : {s} : {d}\n{s}\n--------\n", .{
+            item.id,
+            item.title,
+            item.by,
+            item.kids.len,
+            item.text,
+        });
+        count += 1;
+    }
+    std.debug.print("total num items: {d}\n", .{count});
+}
+
+test fetchDiscussion {
+    var ts_allocator: std.heap.ThreadSafeAllocator = .{
+        .child_allocator = std.testing.allocator,
+    };
+    const allocator = ts_allocator.allocator();
+
+    var hn: Self = try .init(allocator);
+    defer hn.deinit(allocator);
+
+    const items = try hn.fetchDiscussion(
+        allocator,
+        4558429,
+        4558521,
+    );
     defer freeItems(allocator, items);
 
     var count: usize = 0;

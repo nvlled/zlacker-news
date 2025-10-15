@@ -11,6 +11,7 @@ const rrrr = @import("rrrr");
 pub const Data = struct {
     items: []const HN.Item,
     item_lookup: *std.AutoHashMapUnmanaged(HN.ItemID, HN.Item),
+    discussion_mode: bool,
 };
 
 const hn_link: rrrr.Regex = .concat(&.{
@@ -48,7 +49,12 @@ pub fn render(ctx: *RequestContext, data: Data) !void {
 
     try layout.begin(.{ .title = op.title });
 
-    if (op.parent == null) {
+    if (data.discussion_mode) {
+        z.div.@"<>"();
+        try z.a.attrf(arena, .href, "/item?id={d}", .{op.id});
+        try z.a.renderf(arena, "[return to \"{s}\"]", .{op.title});
+        z.div.@"</>"();
+    } else if (op.parent == null) {
         z.div.attrs(.{
             .id = try sprintf(arena, "{d}", .{op.id}),
             .class = "op item",
@@ -96,8 +102,8 @@ pub fn render(ctx: *RequestContext, data: Data) !void {
         z.div.@"</>"();
     } else {
         z.div.@"<>"();
-        try z.a.attrf(arena, .href, "/item?id={d}", .{op.parent.?});
         if (op.thread_id) |tid| {
+            try z.a.attrf(arena, .href, "/item?id={d}", .{op.parent.?});
             z.a.render("[parent]");
             try z.a.attrf(arena, .href, "/item?id={d}", .{tid});
             z.a.render("[thread]");
@@ -151,6 +157,10 @@ pub fn render(ctx: *RequestContext, data: Data) !void {
                     z.a.render("[link]");
                     try z.a.attrf(arena, .href, "https://news.ycombinator.com/item?id={d}", .{item.id});
                     z.a.render("[source]");
+                    if (item.depth >= 2 and item.thread_id != null and !data.discussion_mode) {
+                        try z.a.attrf(arena, .href, "/item/discussion?id={d}&tid={d}", .{ item.id, item.thread_id.? });
+                        z.a.render("[discussion]");
+                    }
 
                     const dt = try formatDateTime(arena, item.time);
                     z.span.render(dt);
