@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const http = std.http;
 const zqlite = @import("zqlite");
 const Allocator = std.mem.Allocator;
+const getBindString = @import("./query_param.zig").getBindString;
 
 client: http.Client,
 thread_pool: *std.Thread.Pool,
@@ -212,17 +213,20 @@ pub fn fetchItem(self: *Self, allocator: Allocator, id: ItemID) !Item {
     const item = try parsed.value.dupe(allocator);
     errdefer item.free(allocator);
 
-    std.sort.block(ItemID, @constCast(item.kids), {}, struct {
-        fn _(_: void, a: ItemID, b: ItemID) bool {
-            return a < b;
-        }
-    }._);
+    std.sort.block(ItemID, @constCast(item.kids), {}, compareID);
 
     return item;
 }
 
 // Caller must call Item.free() for each item and the free the slice itself
-pub fn fetchAllItems(self: *Self, allocator: Allocator, ids: []const ItemID) ![]const Item {
+pub fn fetchAllItems(
+    self: *Self,
+    allocator: Allocator,
+    ids: []const ItemID,
+    options: struct {
+        wg: ?*std.Thread.WaitGroup = null,
+    },
+) ![]const Item {
     const cached_items = try self.db.readItems(allocator, ids);
     if (cached_items) |items| {
         return items;
@@ -290,7 +294,17 @@ pub fn fetchAllItems(self: *Self, allocator: Allocator, ids: []const ItemID) ![]
         return err;
     }
 
-    try self.db.insertItems(items);
+    if (options.wg) |w| {
+        self.thread_pool.spawnWg(w, struct {
+            fn _(hn: *Self, data: []Item) void {
+                hn.db.insertItems(data) catch |err| {
+                    std.log.err("failed to cache items: {any}", .{err});
+                };
+            }
+        }._, .{ self, items });
+    } else {
+        try self.db.insertItems(items);
+    }
 
     return items;
 }
@@ -367,6 +381,9 @@ pub fn fetchThreadAlgolia(self: *Self, allocator: Allocator, opID: ItemID) ![]It
             }).dupe(gpa);
             errdefer item.free(gpa);
 
+            const item_idx = items.items.len;
+            items.appendAssumeCapacity(item);
+
             var comment_count: usize = 1;
             for (aitem.children, 0..) |child, i| {
                 kids[i] = child.id;
@@ -375,10 +392,11 @@ pub fn fetchThreadAlgolia(self: *Self, allocator: Allocator, opID: ItemID) ![]It
                 comment_count += try loop(gpa, thread_id, items, sub_item);
             }
 
-            item.kids = kids;
-            item.descendants = comment_count;
+            std.sort.block(ItemID, @constCast(kids), {}, compareID);
 
-            items.appendAssumeCapacity(item);
+            var p = &items.items[item_idx];
+            p.kids = kids;
+            p.descendants = comment_count;
 
             return comment_count;
         }
@@ -511,7 +529,14 @@ pub fn fetchThreadOfficial(self: *Self, allocator: Allocator, opID: ItemID) ![]I
 
 // Caller must call Item.free() for each item and the free the slice itself
 // Uses the Algolia API, then falls back to official HN API if it fails.
-pub fn fetchThread(self: *Self, allocator: Allocator, opID: ItemID) ![]const Item {
+pub fn fetchThread(
+    self: *Self,
+    allocator: Allocator,
+    opID: ItemID,
+    options: struct {
+        wg: ?*std.Thread.WaitGroup = null,
+    },
+) ![]const Item {
     std.log.debug("fetching thread {d}", .{opID});
     errdefer std.log.debug("failed to fetch thread {d}", .{opID});
 
@@ -531,8 +556,18 @@ pub fn fetchThread(self: *Self, allocator: Allocator, opID: ItemID) ![]const Ite
     };
 
     std.log.debug("fetched thread {d}: got {d} items", .{ opID, items.len });
-    std.sort.block(Item, @constCast(items), {}, compareItem);
-    try self.db.insertItems(items);
+
+    if (options.wg) |wg| {
+        self.thread_pool.spawnWg(wg, struct {
+            fn _(hn: *Self, op_id: ItemID, data: []Item) void {
+                hn.db.insertItems(data) catch |err| {
+                    std.log.err("failed to cache thread: {d}: {any}", .{ op_id, err });
+                };
+            }
+        }._, .{ self, opID, items });
+    } else {
+        try self.db.insertItems(items);
+    }
 
     return items;
 }
@@ -553,6 +588,9 @@ pub fn fillItems(
     }
 }
 
+fn compareID(_: void, a: ItemID, b: ItemID) bool {
+    return a < b;
+}
 fn compareItem(_: void, a: Item, b: Item) bool {
     return a.id < b.id;
 }
@@ -656,7 +694,7 @@ const DB = struct {
     pub fn readThread(
         self: @This(),
         allocator: Allocator,
-        opID: ItemID,
+        op_id: ItemID,
     ) !?[]const Item {
         var queue: std.ArrayList(ItemID) = .{};
         defer queue.deinit(allocator);
@@ -672,106 +710,92 @@ const DB = struct {
 
         errdefer std.log.err("failed to read item: {s}", .{conn.lastError()});
 
-        const item_stmt = try conn.prepare(
-            \\SELECT
-            \\  id,
-            \\  username,
-            \\  score,
-            \\  title,
-            \\  url,
-            \\  descendants,
-            \\  time,
-            \\  text,
-            \\  deleted,
-            \\  dead,
-            \\  parent_id,
-            \\  thread_id,
-            \\  depth,
-            \\  inserted,
-            \\  (SELECT COUNT(*) FROM hn_item_replies
-            \\    WHERE item_id = hn_items.id)
-            \\FROM hn_items
-            \\WHERE id = ?;
-        );
-        defer item_stmt.deinit();
+        var rows = try conn.rows(
+            \\WITH RECURSIVE
+            \\    thread(
+            \\            id, username, score, title, url, descendants, time, text,
+            \\            deleted, dead, parent_id, thread_id, depth, inserted
+            \\    ) AS (
+            \\        SELECT
+            \\            id,
+            \\            username, score, title, url, descendants, time, text,
+            \\            deleted, dead, parent_id, thread_id, depth, inserted
+            \\        FROM hn_items WHERE id = ?
+            \\        UNION
+            \\        SELECT
+            \\            t.id, t.username, t.score, t.title, t.url, t.descendants,
+            \\            t.time, t.text, t.deleted, t.dead, t.parent_id, t.thread_id,
+            \\            t.depth, t.inserted
+            \\          FROM hn_items t JOIN thread
+            \\          ON t.parent_id = thread.id
+            \\    )
+            \\SELECT * from thread ORDER BY id DESC;
+        , .{op_id});
+        defer rows.deinit();
 
-        const replies_stmt = try conn.prepare(
-            \\SELECT reply_id FROM hn_item_replies
-            \\WHERE item_id = ?;
-        );
-        defer replies_stmt.deinit();
-
-        try queue.append(allocator, opID);
+        var reply_ids: std.AutoArrayHashMapUnmanaged(ItemID, *std.ArrayList(ItemID)) = .{};
+        defer {
+            for (reply_ids.values()) |ids| {
+                ids.deinit(allocator);
+                allocator.destroy(ids);
+            }
+            reply_ids.deinit(allocator);
+        }
 
         const now = std.time.timestamp();
-
-        while (queue.pop()) |item_id| {
-            try item_stmt.reset();
-            try item_stmt.bind(.{item_id});
-
-            if (!try item_stmt.step()) {
-                continue;
-            }
-
+        while (rows.next()) |row| {
             var item = Item{
-                .id = @intCast(item_stmt.int(0)),
-                .by = item_stmt.text(1),
-                .score = @intCast(item_stmt.int(2)),
-                .title = item_stmt.text(3),
-                .url = item_stmt.nullableText(4),
-                .descendants = @intCast(item_stmt.int(5)),
-                .time = @intCast(item_stmt.int(6)),
-                .text = item_stmt.text(7),
-                .deleted = item_stmt.int(8) != 0,
-                .dead = item_stmt.int(9) != 0,
-                .parent = if (item_stmt.nullableInt(10)) |n| @intCast(n) else null,
-                .thread_id = if (item_stmt.nullableInt(11)) |n| @intCast(n) else null,
-                .depth = @intCast(item_stmt.int(12)),
-                .inserted = @intCast(item_stmt.int(13)),
+                .id = @intCast(row.int(0)),
+                .by = row.text(1),
+                .score = @intCast(row.int(2)),
+                .title = row.text(3),
+                .url = row.nullableText(4),
+                .descendants = @intCast(row.int(5)),
+                .time = @intCast(row.int(6)),
+                .text = row.text(7),
+                .deleted = row.int(8) != 0,
+                .dead = row.int(9) != 0,
+                .parent = if (row.nullableInt(10)) |n| @intCast(n) else null,
+                .thread_id = if (row.nullableInt(11)) |n| @intCast(n) else null,
+                .depth = @intCast(row.int(12)),
+                .inserted = @intCast(row.int(13)),
             };
-            const num_replies: usize = @intCast(item_stmt.int(14));
 
             if (now - item.inserted >= expiration_sec) {
-                std.log.debug("thread cached expired: {d}", .{opID});
+                std.log.debug("thread cached expired: {d}", .{op_id});
                 for (result.items) |x| x.free(allocator);
                 result.deinit(allocator);
                 return null;
             }
 
+            if (reply_ids.get(item.id)) |ids| {
+                item.kids = ids.items;
+                std.sort.block(ItemID, @constCast(item.kids), {}, compareID);
+            }
+
+            if (item.parent) |parent_id| {
+                if (reply_ids.get(parent_id)) |ids| {
+                    try ids.append(allocator, item.id);
+                } else {
+                    var ids = try allocator.create(std.ArrayList(ItemID));
+                    ids.* = .{};
+                    try ids.append(allocator, item.id);
+                    try reply_ids.put(allocator, parent_id, ids);
+                }
+            }
+
             item = try item.dupe(allocator);
             errdefer item.free(allocator);
 
-            if (num_replies > 0) {
-                const replies: []ItemID = try allocator.alloc(ItemID, num_replies);
-                errdefer allocator.free(replies);
-
-                try replies_stmt.reset();
-                try replies_stmt.bind(.{item.id});
-
-                var i: usize = 0;
-                while (try replies_stmt.step()) {
-                    replies[i] = @intCast(replies_stmt.int(0));
-                    i += 1;
-                }
-                item.kids = replies;
-            }
-
             try result.append(allocator, item);
-
-            try queue.ensureTotalCapacity(allocator, queue.items.len + item.kids.len);
-            const kids = item.kids;
-            for (0..kids.len) |i| {
-                queue.appendAssumeCapacity(kids[kids.len - i - 1]);
-            }
         }
 
-        if (result.items.len == 0 or result.items.len < result.items[0].kids.len + 1) {
+        if (result.items.len == 0 or result.items.len < result.items[0].descendants) {
             return null;
         }
 
         const items = try result.toOwnedSlice(allocator);
-
-        std.sort.block(Item, @constCast(items), {}, compareItem);
+        std.mem.reverse(Item, items);
 
         return items;
     }
@@ -782,9 +806,6 @@ const DB = struct {
         ids: []const ItemID,
     ) !?[]const Item {
         if (ids.len == 0) return &.{};
-
-        var queue: std.ArrayList(ItemID) = try .initCapacity(allocator, ids.len);
-        defer queue.deinit(allocator);
 
         var result: std.ArrayList(Item) = .{};
         errdefer {
@@ -797,7 +818,7 @@ const DB = struct {
 
         errdefer std.log.err("failed to read item: {s}", .{conn.lastError()});
 
-        const item_stmt = try conn.prepare(
+        const query = try std.fmt.allocPrint(allocator,
             \\SELECT
             \\  id,
             \\  username,
@@ -812,90 +833,54 @@ const DB = struct {
             \\  parent_id,
             \\  thread_id,
             \\  depth,
-            \\  inserted,
-            \\  (SELECT COUNT(*) FROM hn_item_replies
-            \\    WHERE item_id = hn_items.id)
+            \\  hn_items.inserted
             \\FROM hn_items
-            \\WHERE id = ?;
-        );
-        defer item_stmt.deinit();
+            \\LEFT JOIN hn_feed ON id = item_id
+            \\WHERE id IN ({s})
+            \\ORDER BY num ASC, hn_items.inserted ASC
+        , .{getBindString(ids.len)});
+        defer allocator.free(query);
 
-        const replies_stmt = try conn.prepare(
-            \\SELECT reply_id FROM hn_item_replies
-            \\WHERE item_id = ?;
-        );
-        defer replies_stmt.deinit();
-
-        for (0..ids.len) |i| {
-            queue.appendAssumeCapacity(ids[ids.len - i - 1]);
-        }
+        var rows: zqlite.Rows = .{ .stmt = try conn.prepare(query), .err = null };
+        defer rows.deinit();
+        for (ids, 0..) |id, i| try rows.stmt.bindValue(id, i);
 
         var invalidated = false;
         const now = std.time.timestamp();
 
-        for (0..ids.len) |idx| {
-            const item_id = ids[idx];
-
-            try item_stmt.reset();
-            try item_stmt.bind(.{item_id});
-
-            if (!try item_stmt.step()) {
-                invalidated = true;
-                break;
-            }
-
-            var item = Item{
-                .id = @intCast(item_stmt.int(0)),
-                .by = item_stmt.text(1),
-                .score = @intCast(item_stmt.int(2)),
-                .title = item_stmt.text(3),
-                .url = item_stmt.nullableText(4),
-                .descendants = @intCast(item_stmt.int(5)),
-                .time = @intCast(item_stmt.int(6)),
-                .text = item_stmt.text(7),
-                .deleted = item_stmt.int(8) != 0,
-                .dead = item_stmt.int(9) != 0,
-                .parent = if (item_stmt.nullableInt(10)) |n| @intCast(n) else null,
-                .thread_id = if (item_stmt.nullableInt(11)) |n| @intCast(n) else null,
-                .depth = @intCast(item_stmt.int(12)),
-                .inserted = @intCast(item_stmt.int(13)),
+        while (rows.next()) |row| {
+            const item = Item{
+                .id = @intCast(row.int(0)),
+                .by = row.text(1),
+                .score = @intCast(row.int(2)),
+                .title = row.text(3),
+                .url = row.nullableText(4),
+                .descendants = @intCast(row.int(5)),
+                .time = @intCast(row.int(6)),
+                .text = row.text(7),
+                .deleted = row.int(8) != 0,
+                .dead = row.int(9) != 0,
+                .parent = if (row.nullableInt(10)) |n| @intCast(n) else null,
+                .thread_id = if (row.nullableInt(11)) |n| @intCast(n) else null,
+                .depth = @intCast(row.int(12)),
+                .inserted = @intCast(row.int(13)),
             };
-            const num_replies: usize = @intCast(item_stmt.int(14));
 
             if (now - item.inserted >= expiration_sec) {
                 invalidated = true;
                 break;
             }
 
-            item = try item.dupe(allocator);
-            errdefer item.free(allocator);
-
-            if (num_replies > 0) {
-                const replies: []ItemID = try allocator.alloc(ItemID, num_replies);
-                errdefer allocator.free(replies);
-
-                try replies_stmt.reset();
-                try replies_stmt.bind(.{item.id});
-
-                var i: usize = 0;
-                while (try replies_stmt.step()) {
-                    replies[i] = @intCast(replies_stmt.int(0));
-                    i += 1;
-                }
-                item.kids = replies;
-            }
-
-            try result.append(allocator, item);
+            try result.append(allocator, try item.dupe(allocator));
         }
 
-        if (invalidated) {
+        if (invalidated or result.items.len < ids.len) {
             for (result.items) |item| item.free(allocator);
             result.deinit(allocator);
             return null;
         }
 
         const items = try result.toOwnedSlice(allocator);
-
         return items;
     }
 
@@ -1184,8 +1169,9 @@ test "fetch:index" {
 
     const story_ids = try hn.fetchTopStoryIDs(allocator, 30, 0);
     defer allocator.free(story_ids);
+    std.debug.print("ids: {any}\n", .{story_ids});
 
-    const items: []const Item = try hn.fetchAllItems(allocator, story_ids[0..1]);
+    const items: []const Item = try hn.fetchAllItems(allocator, story_ids[0..1], .{});
     defer {
         for (items) |item| item.free(allocator);
         allocator.free(items);
@@ -1210,7 +1196,7 @@ test fetchThread {
     var hn: Self = try .init(allocator);
     defer hn.deinit(allocator);
 
-    const items = try hn.fetchThread(allocator, 1727731);
+    const items = try hn.fetchThread(allocator, 1727731, .{});
     defer freeItems(allocator, items);
 
     var count: usize = 0;

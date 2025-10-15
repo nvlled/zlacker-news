@@ -10,9 +10,9 @@ const RequestContext = @import("./context.zig");
 const Action = *const fn (*RequestContext) anyerror!void;
 
 const Handler = struct {
-    allocator: std.mem.Allocator,
-    thread_pool: *std.Thread.Pool,
     hn: *HN,
+    allocator: std.mem.Allocator,
+    thread_pool: ?*std.Thread.Pool = null,
 
     pub fn dispatch(app: *const Handler, action: Action, req: *httpz.Request, res: *httpz.Response) !void {
         var zhtml: Zhtml = try .init(res.writer(), res.arena);
@@ -134,8 +134,12 @@ const Controllers = struct {
         const ids = try ctx.hn.fetchTopStoryIDs(allocator, page_size, i);
         defer allocator.free(ids);
 
-        const items = try ctx.hn.fetchAllItems(allocator, ids);
-        defer HN.freeItems(allocator, items);
+        var wg: std.Thread.WaitGroup = .{};
+        const items = try ctx.hn.fetchAllItems(allocator, ids, .{ .wg = &wg });
+        defer {
+            wg.wait();
+            HN.freeItems(allocator, items);
+        }
 
         ctx.res.header("Content-Type", "text/html");
         try @import("./pages/index.zig").render(ctx, .{
@@ -154,8 +158,12 @@ const Controllers = struct {
             return error.@"Need an ID";
         };
 
-        const items = try ctx.hn.fetchThread(allocator, id);
-        defer HN.freeItems(allocator, items);
+        var wg: std.Thread.WaitGroup = .{};
+        const items = try ctx.hn.fetchThread(allocator, id, .{ .wg = &wg });
+        defer {
+            wg.wait();
+            HN.freeItems(allocator, items);
+        }
 
         var lookup: std.AutoHashMapUnmanaged(HN.ItemID, HN.Item) = .{};
         try HN.fillItems(ctx.res.arena, @constCast(items), &lookup);
@@ -183,6 +191,7 @@ test "routes:index" {
         .req = wt.req,
         .res = wt.res,
         .allocator = allocator,
+        .thread_pool = null,
     };
     try Controllers.index(&ctx);
     try wt.expectStatus(200);
@@ -206,6 +215,7 @@ test "routes:item" {
         .req = wt.req,
         .res = wt.res,
         .allocator = allocator,
+        .thread_pool = null,
     };
 
     const q = try wt.req.query();
@@ -232,6 +242,7 @@ test "routes:assets" {
         .req = wt.req,
         .res = wt.res,
         .allocator = allocator,
+        .thread_pool = null,
     };
 
     ctx.req.url = .parse("/assets/script.js");
