@@ -11,10 +11,17 @@ const rrrr = @import("rrrr");
 pub const Data = struct {
     items: []const HN.Item,
     item_lookup: *std.AutoHashMapUnmanaged(HN.ItemID, HN.Item),
-    discussion_mode: bool,
+    discussion_mode: bool = false,
+    with_links_only: bool = false,
 };
 
-const hn_link: rrrr.Regex = .concat(&.{
+const any_link: rrrr.RE = &.concat(&.{
+    &.literal("http"),
+    &.optional(&.literal("s")),
+    &.literal(":&#x2F;&#x2F;"),
+});
+
+const hn_link: rrrr.RE = &.concat(&.{
     &.literal(
         \\<a href="https:&#x2F;&#x2F;news.ycombinator.com&#x2F;item?id=
     ),
@@ -49,17 +56,18 @@ pub fn render(ctx: *RequestContext, data: Data) !void {
 
     try layout.begin(.{ .title = op.title });
 
+    z.div.attrs(.{
+        .id = try sprintf(arena, "{d}", .{op.id}),
+        .class = "op item",
+    });
+    z.div.@"<>"();
+
     if (data.discussion_mode) {
         z.div.@"<>"();
         try z.a.attrf(arena, .href, "/item?id={d}", .{op.id});
         try z.a.renderf(arena, "[return to \"{s}\"]", .{op.title});
         z.div.@"</>"();
     } else if (op.parent == null) {
-        z.div.attrs(.{
-            .id = try sprintf(arena, "{d}", .{op.id}),
-            .class = "op item",
-        });
-        z.div.@"<>"();
         {
             z.h1.@"<>"();
             {
@@ -90,8 +98,14 @@ pub fn render(ctx: *RequestContext, data: Data) !void {
             }
             try z.a.attrf(arena, .href, "https://news.ycombinator.com/item?id={d}", .{op.id});
             z.a.render("[source]");
+
             z.a.attr(.href, "#bottom");
             z.a.render("[go to bottom]");
+
+            if (!data.with_links_only) {
+                try z.a.attrf(arena, .href, "/item?id={d}&links=ye", .{op.id});
+                z.a.render("[links]");
+            }
 
             if (op.text.len > 0) {
                 z.p.@"<>"();
@@ -99,9 +113,7 @@ pub fn render(ctx: *RequestContext, data: Data) !void {
                 z.p.@"</>"();
             }
         }
-        z.div.@"</>"();
     } else {
-        z.div.@"<>"();
         if (op.thread_id) |tid| {
             try z.a.attrf(arena, .href, "/item?id={d}", .{op.parent.?});
             z.a.render("[parent]");
@@ -109,10 +121,10 @@ pub fn render(ctx: *RequestContext, data: Data) !void {
             z.a.render("[thread]");
             try z.print(arena, " {d} comments", .{items.len - 1});
         }
-        z.div.@"</>"();
     }
 
-    if (op.kids.len > 0) {
+    z.div.@"<>"();
+    if (op.kids.len > 0 and !data.with_links_only) {
         z.small.@"<>"();
         try z.print(arena, "replies({d}): ", .{op.kids.len});
         z.small.@"</>"();
@@ -128,10 +140,26 @@ pub fn render(ctx: *RequestContext, data: Data) !void {
         }
         z.span.@"</>"();
     }
+    z.div.@"</>"();
+
+    if (data.with_links_only) {
+        z.div.@"<>"();
+        z.br.render();
+        z.em.render("NOTE: showing posts with links only");
+        try z.a.attrf(arena, .href, "/item?id={d}", .{op.id});
+        z.a.render("show all posts");
+        z.div.@"</>"();
+    }
+
+    z.div.@"</>"();
 
     const start: usize = if (items[0].parent != null) 0 else 1;
 
     for (items[start..], 0..) |item, n| {
+        if (data.with_links_only and !try any_link.matches(arena, item.text, .{})) {
+            continue;
+        }
+
         z.div.attrs(.{
             .id = try sprintf(arena, "{d}", .{item.id}),
             .class = "item",
@@ -154,7 +182,7 @@ pub fn render(ctx: *RequestContext, data: Data) !void {
                     arena.free(name);
 
                     try z.a.attrf(arena, .href, "/item?id={d}", .{item.id});
-                    z.a.render("[link]");
+                    z.a.render("[view]");
                     try z.a.attrf(arena, .href, "https://news.ycombinator.com/item?id={d}", .{item.id});
                     z.a.render("[source]");
                     if (item.depth >= 2 and item.thread_id != null and !data.discussion_mode) {
@@ -227,7 +255,7 @@ pub fn render(ctx: *RequestContext, data: Data) !void {
 
             z.div.@"</>"();
 
-            if (item.kids.len > 0) {
+            if (item.kids.len > 0 and !data.with_links_only) {
                 z.small.@"<>"();
                 try z.print(arena, "replies({d}): ", .{item.kids.len});
                 z.small.@"</>"();

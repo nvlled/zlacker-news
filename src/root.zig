@@ -129,7 +129,7 @@ const Controllers = struct {
         const page_num = if (query.get("page")) |p| std.fmt.parseInt(u8, p, 10) catch 0 else 0;
         const allocator = ctx.allocator;
 
-        const page_size: usize = 30;
+        const page_size: usize = 20;
         const i = page_num * page_size;
 
         const ids = try ctx.hn.fetchTopStoryIDs(allocator, page_size, i);
@@ -158,6 +158,7 @@ const Controllers = struct {
         } else {
             return error.@"Need an ID";
         };
+        const with_links_only = query.get("links") != null;
 
         var wg: std.Thread.WaitGroup = .{};
         const items = try ctx.hn.fetchThread(allocator, id, .{ .wg = &wg });
@@ -174,7 +175,7 @@ const Controllers = struct {
         try @import("./pages/item.zig").render(ctx, .{
             .items = items,
             .item_lookup = &lookup,
-            .discussion_mode = false,
+            .with_links_only = with_links_only,
         });
     }
 

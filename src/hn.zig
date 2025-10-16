@@ -624,6 +624,7 @@ pub fn fetchThread(
             };
         };
     };
+
     std.sort.block(Item, @constCast(items), {}, compareItem);
 
     std.log.debug("fetched thread {d}: got {d} items", .{ opID, items.len });
@@ -977,11 +978,10 @@ const DB = struct {
             \\  parent_id,
             \\  thread_id,
             \\  depth,
-            \\  hn_items.inserted
+            \\  inserted
             \\FROM hn_items
-            \\LEFT JOIN hn_feed ON id = item_id
             \\WHERE id IN ({s})
-            \\ORDER BY num ASC, hn_items.inserted ASC
+            \\ORDER BY time DESC
         , .{getBindString(ids.len)});
         defer allocator.free(query);
 

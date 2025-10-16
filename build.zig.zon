@@ -48,8 +48,8 @@
             .path = "vendor/zqlite.zig",
         },
         .rrrr = .{
-            .url = "git+https://github.com/nvlled/rrrr.git#55d0e6418a3206b2329cd65f1bb1d7a50beaec76",
-            .hash = "rrrr-0.0.0-wROJJPT5AQCEqF9NRbE86x3WlExlctc-7cK7QQV2PokL",
+            .url = "git+https://github.com/nvlled/rrrr.git#9a3261300c6f1c6def4a57b35ac9bc1b5dcca927",
+            .hash = "rrrr-0.0.0-wROJJNn8AQC5AYEgttQYDxFWzlOyw65VWf1VEPyGQ88W",
         },
     },
     .paths = .{
