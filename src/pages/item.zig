@@ -68,51 +68,68 @@ pub fn render(ctx: *RequestContext, data: Data) !void {
         try z.a.renderf(arena, "[return to \"{s}\"]", .{op.title});
         z.div.@"</>"();
     } else if (op.parent == null) {
+        z.h1.@"<>"();
         {
-            z.h1.@"<>"();
-            {
-                z.a.attr(.href, op.url orelse "#");
-                z.a.render(op.title);
-            }
-            z.h1.@"</>"();
-
-            const dt = try formatDateTime(arena, op.time);
-            const name = try encodeName(arena, op, op.id);
-            try z.print(
-                arena,
-                "submitted by {s} on {s} | {d} points {d} comments",
-                .{
-                    name,
-                    dt,
-                    op.score,
-                    items.len - 1,
-                },
-            );
-            arena.free(name);
-            arena.free(dt);
-
-            z.br.render();
-            if (op.url) |url| {
-                z.a.attr(.href, url);
-                z.a.render("[view article]");
-            }
-            try z.a.attrf(arena, .href, "https://news.ycombinator.com/item?id={d}", .{op.id});
-            z.a.render("[source]");
-
-            z.a.attr(.href, "#bottom");
-            z.a.render("[go to bottom]");
-
-            if (!data.with_links_only) {
-                try z.a.attrf(arena, .href, "/item?id={d}&links=ye", .{op.id});
-                z.a.render("[links]");
-            }
-
-            if (op.text.len > 0) {
-                z.p.@"<>"();
-                z.@"writeUnsafe!?"(op.text);
-                z.p.@"</>"();
-            }
+            z.a.attr(.href, op.url orelse "#");
+            z.a.render(op.title);
         }
+        z.h1.@"</>"();
+
+        const dt = try formatDateTime(arena, op.time);
+        const name = try encodeName(arena, op, op.id);
+        try z.print(
+            arena,
+            "submitted by {s} on {s} | {d} points {d} comments",
+            .{
+                name,
+                dt,
+                op.score,
+                items.len - 1,
+            },
+        );
+        arena.free(name);
+        arena.free(dt);
+
+        z.br.render();
+        if (op.url) |url| {
+            z.a.attr(.href, url);
+            z.a.render("[view article]");
+        }
+        try z.a.attrf(arena, .href, "https://news.ycombinator.com/item?id={d}", .{op.id});
+        z.a.render("[source]");
+
+        z.a.attr(.href, "#bottom");
+        z.a.render("[go to bottom]");
+
+        if (!data.with_links_only) {
+            try z.a.attrf(arena, .href, "/item?id={d}&links=ye", .{op.id});
+            z.a.render("[links]");
+        }
+
+        if (op.text.len > 0) {
+            z.p.@"<>"();
+            z.@"writeUnsafe!?"(op.text);
+            z.p.@"</>"();
+        }
+
+        z.div.@"<>"();
+        if (op.kids.len > 0 and !data.with_links_only) {
+            z.small.@"<>"();
+            try z.print(arena, "replies({d}): ", .{op.kids.len});
+            z.small.@"</>"();
+
+            z.span.attr(.class, "reply-links");
+            z.span.@"<>"();
+            for (op.kids) |rep_id| {
+                z.small.@"<>"();
+                replyLink.attr(.class, "resp");
+                try replyLink.render(arena, lookup.get(rep_id));
+                z.write(" ");
+                z.small.@"</>"();
+            }
+            z.span.@"</>"();
+        }
+        z.div.@"</>"();
     } else {
         if (op.thread_id) |tid| {
             try z.a.attrf(arena, .href, "/item?id={d}", .{op.parent.?});
@@ -122,25 +139,6 @@ pub fn render(ctx: *RequestContext, data: Data) !void {
             try z.print(arena, " {d} comments", .{items.len - 1});
         }
     }
-
-    z.div.@"<>"();
-    if (op.kids.len > 0 and !data.with_links_only) {
-        z.small.@"<>"();
-        try z.print(arena, "replies({d}): ", .{op.kids.len});
-        z.small.@"</>"();
-
-        z.span.attr(.class, "reply-links");
-        z.span.@"<>"();
-        for (op.kids) |rep_id| {
-            z.small.@"<>"();
-            replyLink.attr(.class, "resp");
-            try replyLink.render(arena, lookup.get(rep_id));
-            z.write(" ");
-            z.small.@"</>"();
-        }
-        z.span.@"</>"();
-    }
-    z.div.@"</>"();
 
     if (data.with_links_only) {
         z.div.@"<>"();
