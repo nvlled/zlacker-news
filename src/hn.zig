@@ -4,6 +4,7 @@ const http = std.http;
 const zqlite = @import("zqlite");
 const Allocator = std.mem.Allocator;
 const getBindString = @import("./query_param.zig").getBindString;
+const curl = @import("curl");
 
 client: http.Client,
 thread_pool: *std.Thread.Pool,
@@ -13,6 +14,240 @@ cache: struct {
     remover_task_active: bool = false,
     wg: std.Thread.WaitGroup = .{},
 } = .{},
+
+user: struct {
+    username: []const u8,
+    password: []const u8,
+    cookie: ?[]const u8 = null,
+} = .{
+    .username = "",
+    .password = "",
+},
+
+fetcher: *Fetcher,
+
+const Fetcher = struct {
+    multi: curl.Multi,
+    ca_bundle: std.array_list.Managed(u8),
+
+    blocker: std.Thread.ResetEvent = .{},
+    result: std.AutoHashMapUnmanaged(*anyopaque, *Job.Shared) = .{},
+    running: std.atomic.Value(bool) = .init(false),
+    running_wg: std.Thread.WaitGroup = .{},
+
+    queue: std.ArrayList(QueueItem) = .{},
+    queue_mu: std.Thread.Mutex = .{},
+
+    const QueueItem = struct {
+        easy: curl.Easy,
+        wg: *std.Thread.WaitGroup,
+    };
+
+    const Job = struct {
+        easy: curl.Easy,
+        buf: *std.Io.Writer.Allocating,
+        shared: *Shared,
+
+        owns_wg: bool,
+
+        const Shared = struct {
+            wg: *std.Thread.WaitGroup,
+            failed: bool,
+        };
+
+        pub fn init(allocator: Allocator, wg_arg: ?*std.Thread.WaitGroup) !@This() {
+            const wg = wg_arg orelse blk: {
+                const w = try allocator.create(std.Thread.WaitGroup);
+                w.* = .{};
+                break :blk w;
+            };
+
+            const shared = try allocator.create(Shared);
+            shared.* = .{
+                .wg = wg,
+                .failed = false,
+            };
+
+            const buf = try allocator.create(std.Io.Writer.Allocating);
+            buf.* = .init(allocator);
+
+            return .{
+                .easy = try .init(.{}),
+                .buf = buf,
+                .owns_wg = wg_arg == null,
+                .shared = shared,
+            };
+        }
+
+        pub fn deinit(self: *@This(), allocator: Allocator) void {
+            if (self.owns_wg) allocator.destroy(self.shared.wg);
+            self.easy.deinit();
+            self.buf.deinit();
+
+            allocator.destroy(self.shared);
+            allocator.destroy(self.buf);
+        }
+
+        pub fn wait(self: *@This()) void {
+            if (self.owns_wg)
+                self.shared.wg.wait();
+        }
+
+        pub fn waitOutput(self: *@This()) ![]const u8 {
+            if (self.owns_wg) self.shared.wg.wait();
+            if (self.shared.failed) return Error.FetchError;
+
+            return self.buf.toOwnedSlice();
+        }
+    };
+
+    fn deinit(self: *@This(), allocator: Allocator) void {
+        if (self.running.load(.monotonic)) {
+            self.stop();
+            self.running_wg.wait();
+        }
+
+        self.result.deinit(allocator);
+        self.multi.deinit();
+        self.ca_bundle.deinit();
+        self.queue.deinit(allocator);
+    }
+
+    fn stop(self: *@This()) void {
+        self.running.store(false, .monotonic);
+        self.multi.wakeup() catch {};
+        self.blocker.set();
+    }
+
+    fn startBackground(self: *@This()) !void {
+        self.running.store(true, .monotonic);
+        const thread = try std.Thread.spawn(.{}, Fetcher.start, .{self});
+        thread.detach();
+    }
+
+    fn start(self: *@This()) void {
+        self.running_wg.start();
+        self.running.store(true, .monotonic);
+        defer {
+            self.running.store(false, .monotonic);
+            self.running_wg.finish();
+        }
+
+        while (self.running.load(.unordered)) {
+            if (self.queue.items.len > 0) {
+                self.queue_mu.lock();
+                defer self.queue_mu.unlock();
+
+                var limit: usize = 32;
+                while (self.queue.pop()) |item| {
+                    self.multi.addHandle(item.easy) catch |err| {
+                        std.log.err("failed to add handle: {any}", .{err});
+                        _ = self.result.remove(item.easy.handle);
+                        continue;
+                    };
+
+                    limit -= 1;
+                    if (limit == 0) break;
+                }
+            }
+
+            const count = blk: {
+                const c = self.multi.perform() catch |err| {
+                    std.log.err("curl: failed to perform : {any}", .{err});
+                    continue;
+                };
+                break :blk c;
+            };
+
+            if (count > 0) {
+                _ = self.multi.poll(null, 100) catch {
+                    continue;
+                };
+            }
+
+            const info = self.multi.readInfo() catch |err| switch (err) {
+                error.InfoReadExhausted => {
+                    if (count == 0) {
+                        self.blocker.timedWait(1e8 * 100) catch {};
+                        self.blocker.reset();
+                    }
+                    continue;
+                },
+            };
+
+            const easy_handle = info.msg.easy_handle.?;
+
+            var status_code: c_long = 0;
+            curl.checkCode(
+                curl.libcurl.curl_easy_getinfo(
+                    easy_handle,
+                    curl.libcurl.CURLINFO_RESPONSE_CODE,
+                    &status_code,
+                ),
+            ) catch |err| {
+                std.log.err("curl: huh: {any}", .{err});
+            };
+
+            {
+                self.queue_mu.lock();
+                defer self.queue_mu.unlock();
+
+                self.multi.removeHandle(easy_handle) catch |err| {
+                    std.log.err("curl: failed to remove handle: {any}", .{err});
+                };
+            }
+
+            if (self.result.get(easy_handle)) |item| {
+                item.wg.finish();
+                _ = curl.checkCode(info.msg.data.result) catch {
+                    item.failed = true;
+                };
+                _ = self.result.remove(easy_handle);
+            }
+        }
+    }
+
+    // Caller must deinit returned value
+    fn submit(self: *@This(), allocator: Allocator, args: struct {
+        url: [:0]const u8,
+        method: curl.Easy.Method = .GET,
+        wg: ?*std.Thread.WaitGroup = null,
+    }) !Job {
+        if (!self.running.load(.unordered)) {
+            @panic("fetcher is not running, cannot submit job");
+        }
+
+        var buf = std.Io.Writer.Allocating.init(allocator);
+        defer buf.deinit();
+
+        var job: Fetcher.Job = try .init(allocator, args.wg);
+        job.easy.ca_bundle = self.ca_bundle;
+        try job.easy.setUrl(args.url);
+        try job.easy.setMethod(args.method);
+        try job.easy.setWriter(&job.buf.writer);
+
+        job.shared.wg.start();
+        errdefer job.shared.wg.finish();
+
+        {
+            self.queue_mu.lock();
+            defer self.queue_mu.unlock();
+
+            try self.result.put(allocator, job.easy.handle, job.shared);
+            errdefer _ = self.result.remove(job.easy.handle);
+
+            try self.queue.append(allocator, .{
+                .easy = job.easy,
+                .wg = job.shared.wg,
+            });
+        }
+
+        self.multi.wakeup() catch {};
+        self.blocker.set();
+
+        return job;
+    }
+};
 
 pub const Error = error{ FetchError, InvalidCacheFile };
 
@@ -129,18 +364,29 @@ pub fn init(allocator: Allocator) !Self {
 
     try db.createDatabase();
 
+    const fetcher = try allocator.create(Fetcher);
+    fetcher.* = .{
+        .multi = try .init(),
+        .ca_bundle = try curl.allocCABundle(allocator),
+    };
+    try fetcher.startBackground();
+
     return .{
         .client = client,
         .thread_pool = tpool,
         .db = db,
+        .fetcher = fetcher,
     };
 }
 
 pub fn deinit(self: *Self, allocator: Allocator) void {
+    self.fetcher.deinit(allocator);
     self.client.deinit();
     self.thread_pool.deinit();
     self.db.deinit();
+
     allocator.destroy(self.thread_pool);
+    allocator.destroy(self.fetcher);
 }
 
 pub fn waitBackgroundTasks(self: *Self) void {
@@ -148,22 +394,46 @@ pub fn waitBackgroundTasks(self: *Self) void {
 }
 
 // Caller must free returned string
-pub fn fetch(self: *Self, arena: Allocator, url: []const u8) ![]const u8 {
+pub fn fetch(self: *Self, allocator: Allocator, url: [:0]const u8) ![]const u8 {
     std.log.debug("fetching url {s}", .{url});
     defer std.log.debug("fetched url {s}", .{url});
-    var buf: std.Io.Writer.Allocating = .init(arena);
+
+    var buf = std.Io.Writer.Allocating.init(allocator);
     defer buf.deinit();
 
-    const result = try self.client.fetch(.{
+    var job = try self.fetcher.submit(allocator, .{
         .method = .GET,
-        .location = .{ .url = url },
-        .response_writer = &buf.writer,
-        .keep_alive = false,
+        .url = url,
+    });
+    defer job.deinit(allocator);
+
+    job.wait();
+    if (job.shared.failed) return Error.FetchError;
+
+    return try job.buf.toOwnedSlice();
+}
+
+pub fn fetchAsync(
+    self: *Self,
+    allocator: Allocator,
+    url: [:0]const u8,
+    options: struct {
+        wg: ?*std.Thread.WaitGroup = null,
+    },
+) !Fetcher.Job {
+    std.log.debug("fetching url {s}", .{url});
+    defer std.log.debug("fetched url {s}", .{url});
+
+    var buf = std.Io.Writer.Allocating.init(allocator);
+    defer buf.deinit();
+
+    const job = try self.fetcher.submit(allocator, .{
+        .method = .GET,
+        .url = url,
+        .wg = options.wg,
     });
 
-    if (result.status != .ok) return Error.FetchError;
-
-    return buf.toOwnedSlice();
+    return job;
 }
 
 // Caller must free returned slice
@@ -195,16 +465,36 @@ pub fn fetchTopStoryIDs(
     return result;
 }
 
-// Caller must call Item.free() afterwards
-pub fn fetchItem(self: *Self, allocator: Allocator, id: ItemID) !Item {
-    const url = try std.fmt.allocPrint(allocator, "https://hacker-news.firebaseio.com/v0/item/{d}.json", .{
+const PromisedItem = struct {
+    job: Fetcher.Job,
+    url: [:0]const u8,
+
+    pub fn deinit(self: *@This(), allocator: Allocator) void {
+        self.job.deinit(allocator);
+        allocator.free(self.url);
+    }
+
+    pub fn await(self: *@This(), allocator: Allocator) !Item {
+        const json_str = try self.job.waitOutput();
+        defer allocator.free(json_str);
+        return parseItem(allocator, json_str);
+    }
+};
+
+pub fn fetchItemAsync(self: *Self, allocator: Allocator, id: ItemID, options: struct {
+    wg: ?*std.Thread.WaitGroup = null,
+}) !PromisedItem {
+    const url = try std.fmt.allocPrintSentinel(allocator, "https://hacker-news.firebaseio.com/v0/item/{d}.json", .{
         id,
-    });
-    defer allocator.free(url);
+    }, 0);
 
-    const json_str = try self.fetch(allocator, url);
-    defer allocator.free(json_str);
+    return .{
+        .url = url,
+        .job = try self.fetchAsync(allocator, url, .{ .wg = options.wg }),
+    };
+}
 
+fn parseItem(allocator: Allocator, json_str: []const u8) !Item {
     const parsed = try std.json.parseFromSlice(Item, allocator, json_str, .{
         .ignore_unknown_fields = true,
     });
@@ -214,8 +504,20 @@ pub fn fetchItem(self: *Self, allocator: Allocator, id: ItemID) !Item {
     errdefer item.free(allocator);
 
     std.sort.block(ItemID, @constCast(item.kids), {}, compareID);
-
     return item;
+}
+
+// Caller must call Item.free() afterwards
+pub fn fetchItem(self: *Self, allocator: Allocator, id: ItemID) !Item {
+    const url = try std.fmt.allocPrintSentinel(allocator, "https://hacker-news.firebaseio.com/v0/item/{d}.json", .{
+        id,
+    }, 0);
+    defer allocator.free(url);
+
+    const json_str = try self.fetch(allocator, url);
+    defer allocator.free(json_str);
+
+    return parseItem(allocator, json_str);
 }
 
 // Caller must call Item.free() for each item and the free the slice itself
@@ -224,7 +526,7 @@ pub fn fetchAllItems(
     allocator: Allocator,
     ids: []const ItemID,
     options: struct {
-        wg: ?*std.Thread.WaitGroup = null,
+        cache_write: ?*std.Thread.WaitGroup = null,
     },
 ) ![]const Item {
     const cached_items = try self.db.readItems(allocator, ids);
@@ -242,59 +544,33 @@ pub fn fetchAllItems(
 
     var wg: std.Thread.WaitGroup = .{};
 
-    const SpawnArgs = struct {
-        id: ItemID,
-        allocator: Allocator,
-        items: []Item,
-        index: usize,
-        hn: *Self,
-        err: *?anyerror,
-    };
+    var created_jobs: usize = 0;
+    var jobs: []PromisedItem = try allocator.alloc(PromisedItem, ids.len);
+    defer {
+        for (0..created_jobs) |i| {
+            jobs[i].deinit(allocator);
+        }
+        allocator.free(jobs);
+    }
 
-    var i: usize = 0;
-    var spawn_err: ?anyerror = null;
-    for (ids) |id| {
-        if (spawn_err != null)
-            break;
-
-        const spawn_args = try allocator.create(SpawnArgs);
-        spawn_args.* = SpawnArgs{
-            .id = id,
-            .allocator = allocator,
-            .items = items,
-            .index = i,
-            .hn = self,
-            .err = &spawn_err,
-        };
-
-        self.thread_pool.spawnWg(
-            &wg,
-            struct {
-                fn _(args: *SpawnArgs) void {
-                    defer args.allocator.destroy(args);
-
-                    const item = args.hn.fetchItem(args.allocator, args.id) catch |err| {
-                        std.debug.print("error while fetching {d}\n", .{args.id});
-                        args.err.* = err;
-                        return;
-                    };
-
-                    args.items[args.index] = item;
-                }
-            }._,
-            .{spawn_args},
-        );
-
-        i += 1;
+    for (ids, 0..) |id, i| {
+        jobs[i] = try self.fetchItemAsync(allocator, id, .{ .wg = &wg });
+        created_jobs += 1;
     }
 
     wg.wait();
 
-    if (spawn_err) |err| {
-        return err;
+    for (jobs, 0..) |*job, i| {
+        items[i] = job.await(allocator) catch |err| {
+            switch (err) {
+                Error.FetchError => std.log.err("failed to fetch item: {d}", .{ids[i]}),
+                else => {},
+            }
+            return err;
+        };
     }
 
-    if (options.wg) |w| {
+    if (options.cache_write) |w| {
         self.thread_pool.spawnWg(w, struct {
             fn _(hn: *Self, data: []Item) void {
                 hn.db.insertItems(data) catch |err| {
@@ -331,10 +607,11 @@ pub fn fetchThreadAlgolia(self: *Self, allocator: Allocator, opID: ItemID) ![]It
     std.log.debug("fetching thread {d} from algolia", .{opID});
     errdefer std.log.debug("failed to fetch thread {d} from algolia", .{opID});
 
-    const url = try std.fmt.allocPrint(
+    const url = try std.fmt.allocPrintSentinel(
         allocator,
         "https://hn.algolia.com/api/v1/items/{d}",
         .{opID},
+        0,
     );
     defer allocator.free(url);
 
@@ -442,8 +719,7 @@ pub fn fetchLineage(_: *Self, allocator: Allocator, item_id: ItemID) ![]Item {
     for (items[1..], 0..) |*item, i| {
         _ = i;
         allocator.free(item.kids);
-        item.kids = &.{};
-        //item.kids = allocator.dupe(Item, &.{items[i - 1].id});
+        item.kids = &.{}; // no need to show replies in this case
     }
 
     return items;
@@ -489,6 +765,7 @@ pub fn fetchThreadOfficial(self: *Self, allocator: Allocator, opID: ItemID) ![]I
     var result_mu: std.Thread.Mutex = .{};
     var queue_mu: std.Thread.Mutex = .{};
 
+    // TODO: don't use threads here
     var spawn_err: ?anyerror = null;
     while (queue.items.len > 0 or !wg.isDone()) {
         if (spawn_err != null)

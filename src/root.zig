@@ -136,7 +136,7 @@ const Controllers = struct {
         defer allocator.free(ids);
 
         var wg: std.Thread.WaitGroup = .{};
-        const items = try ctx.hn.fetchAllItems(allocator, ids, .{ .wg = &wg });
+        const items = try ctx.hn.fetchAllItems(allocator, ids, .{ .cache_write = &wg });
         defer {
             wg.wait();
             HN.freeItems(allocator, items);

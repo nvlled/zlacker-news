@@ -22,6 +22,12 @@ pub fn build(b: *std.Build) void {
     // of this build script using `b.option()`. All defined flags (including
     // target and optimize options) will be listed when running `zig build --help`
     // in this directory.
+
+    const curl = b.dependency("curl", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
     const rrrr = b.dependency("rrrr", .{
         .target = target,
         .optimize = optimize,
@@ -64,6 +70,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "httpz", .module = httpz.module("httpz") },
             .{ .name = "zqlite", .module = zqlite.module("zqlite") },
             .{ .name = "rrrr", .module = rrrr.module("rrrr") },
+            .{ .name = "curl", .module = curl.module("curl") },
         },
     });
     mod.linkSystemLibrary("sqlite3", .{});

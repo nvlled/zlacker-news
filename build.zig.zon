@@ -51,6 +51,10 @@
             .url = "git+https://github.com/nvlled/rrrr.git#9a3261300c6f1c6def4a57b35ac9bc1b5dcca927",
             .hash = "rrrr-0.0.0-wROJJNn8AQC5AYEgttQYDxFWzlOyw65VWf1VEPyGQ88W",
         },
+        .curl = .{
+            .url = "https://github.com/jiacai2050/zig-curl/archive/refs/tags/v0.3.2.zip",
+            .hash = "curl-0.3.2-P4tT4SXPAACuV6f5eyh4jG_1SspjWwMm_vRJfoKrQep5",
+        },
     },
     .paths = .{
         "build.zig",
