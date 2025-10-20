@@ -191,10 +191,7 @@ const Fetcher = struct {
                 },
             };
 
-            // TODO: login
-
-            // TODO: submit pull request to fix/improve example code on zig-curl
-            if (!info.isDone()) continue;
+            if (info.msg.msg != curl.libcurl.CURLMSG_DONE) continue;
 
             const easy_handle = info.msg.easy_handle.?;
 
