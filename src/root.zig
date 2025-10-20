@@ -136,7 +136,10 @@ const Controllers = struct {
         defer allocator.free(ids);
 
         var wg: std.Thread.WaitGroup = .{};
-        const items = try ctx.hn.fetchAllItems(allocator, ids, .{ .cache_write = &wg });
+        const items = try ctx.hn.fetchAllItems(allocator, ids, .{
+            .write_cache = true,
+            .write_cache_wg = &wg,
+        });
         defer {
             wg.wait();
             HN.freeItems(allocator, items);
@@ -209,6 +212,8 @@ const Controllers = struct {
     }
 };
 
+const test_output = @import("build_options").test_output;
+
 test "routes:index" {
     const allocator = std.testing.allocator;
 
@@ -231,7 +236,8 @@ test "routes:index" {
     };
     try Controllers.index(&ctx);
     try wt.expectStatus(200);
-    std.debug.print("test output for \"{s}\":\n{s}\n\n", .{ "/", try wt.getBody() });
+    if (test_output)
+        std.debug.print("test output for \"{s}\":\n{s}\n\n", .{ "/", try wt.getBody() });
 }
 
 test "routes:item" {
@@ -258,7 +264,8 @@ test "routes:item" {
     q.add("id", "1727731");
     try Controllers.item(&ctx);
     try wt.expectStatus(200);
-    std.debug.print("test output for \"{s}\":\n{s}\n\n", .{ "/item", try wt.getBody() });
+    if (test_output)
+        std.debug.print("test output for \"{s}\":\n{s}\n\n", .{ "/item", try wt.getBody() });
 }
 
 test "routes:assets" {
@@ -285,10 +292,11 @@ test "routes:assets" {
 
     try Controllers.assets(&ctx);
     try wt.expectStatus(200);
-    std.debug.print("test output for \"{s}\":\n{s}\n\n", .{
-        "/assets/script.js",
-        try wt.getBody(),
-    });
+    if (test_output)
+        std.debug.print("test output for \"{s}\":\n{s}\n\n", .{
+            "/assets/script.js",
+            try wt.getBody(),
+        });
 }
 
 test {

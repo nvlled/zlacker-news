@@ -9,6 +9,11 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const test_filters = b.option([]const []const u8, "test-filter", "run only test that matches filter") orelse &[0][]const u8{};
 
+    const test_output = b.option(bool, "test-output", "show test output") orelse false;
+
+    const options = b.addOptions();
+    options.addOption(bool, "test_output", test_output);
+
     // Standard target options allow the person running `zig build` to choose
     // what target to build for. Here we do not override the defaults, which
     // means any target is allowed, and the default is native. Other options
@@ -74,6 +79,7 @@ pub fn build(b: *std.Build) void {
         },
     });
     mod.linkSystemLibrary("sqlite3", .{});
+    mod.addOptions("build_options", options);
 
     // Here we define an executable. An executable needs to have a root module
     // which needs to expose a `main` function. While we could add a main function

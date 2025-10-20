@@ -79,7 +79,7 @@ const Fetcher = struct {
             };
         }
 
-        pub fn deinit(self: *@This(), allocator: Allocator) void {
+        pub fn deinit(self: @This(), allocator: Allocator) void {
             if (self.owns_wg) allocator.destroy(self.shared.wg);
             self.easy.deinit();
             self.buf.deinit();
@@ -88,12 +88,28 @@ const Fetcher = struct {
             allocator.destroy(self.buf);
         }
 
-        pub fn wait(self: *@This()) void {
+        pub fn getResponse(self: @This()) !?curl.Easy.Response {
+            const easy_handle = self.easy orelse return null;
+            var status_code: c_long = 0;
+
+            try curl.checkCode(curl.libcurl.curl_easy_getinfo(
+                easy_handle,
+                curl.libcurl.CURLINFO_RESPONSE_CODE,
+                &status_code,
+            ));
+
+            return .{
+                .handle = easy_handle,
+                .status_code = status_code,
+            };
+        }
+
+        pub fn wait(self: @This()) void {
             if (self.owns_wg)
                 self.shared.wg.wait();
         }
 
-        pub fn waitOutput(self: *@This()) ![]const u8 {
+        pub fn waitOutput(self: @This()) ![]const u8 {
             if (self.owns_wg) self.shared.wg.wait();
             if (self.shared.failed) return Error.FetchError;
 
@@ -175,6 +191,11 @@ const Fetcher = struct {
                 },
             };
 
+            // TODO: login
+
+            // TODO: submit pull request to fix/improve example code on zig-curl
+            if (!info.isDone()) continue;
+
             const easy_handle = info.msg.easy_handle.?;
 
             var status_code: c_long = 0;
@@ -199,7 +220,8 @@ const Fetcher = struct {
 
             if (self.result.get(easy_handle)) |item| {
                 item.wg.finish();
-                _ = curl.checkCode(info.msg.data.result) catch {
+                _ = curl.checkCode(info.msg.data.result) catch |err| {
+                    std.debug.print("request failed: {any}\n", .{err});
                     item.failed = true;
                 };
                 _ = self.result.remove(easy_handle);
@@ -469,12 +491,12 @@ const PromisedItem = struct {
     job: Fetcher.Job,
     url: [:0]const u8,
 
-    pub fn deinit(self: *@This(), allocator: Allocator) void {
+    pub fn deinit(self: @This(), allocator: Allocator) void {
         self.job.deinit(allocator);
         allocator.free(self.url);
     }
 
-    pub fn await(self: *@This(), allocator: Allocator) !Item {
+    pub fn await(self: @This(), allocator: Allocator) !Item {
         const json_str = try self.job.waitOutput();
         defer allocator.free(json_str);
         return parseItem(allocator, json_str);
@@ -526,7 +548,8 @@ pub fn fetchAllItems(
     allocator: Allocator,
     ids: []const ItemID,
     options: struct {
-        cache_write: ?*std.Thread.WaitGroup = null,
+        write_cache: bool,
+        write_cache_wg: ?*std.Thread.WaitGroup = null,
     },
 ) ![]const Item {
     const cached_items = try self.db.readItems(allocator, ids);
@@ -570,16 +593,18 @@ pub fn fetchAllItems(
         };
     }
 
-    if (options.cache_write) |w| {
-        self.thread_pool.spawnWg(w, struct {
-            fn _(hn: *Self, data: []Item) void {
-                hn.db.insertItems(data) catch |err| {
-                    std.log.err("failed to cache items: {any}", .{err});
-                };
-            }
-        }._, .{ self, items });
-    } else {
-        try self.db.insertItems(items);
+    if (options.write_cache) {
+        if (options.write_cache_wg) |w| {
+            self.thread_pool.spawnWg(w, struct {
+                fn _(hn: *Self, data: []Item) void {
+                    hn.db.insertItems(data) catch |err| {
+                        std.log.err("failed to cache items: {any}", .{err});
+                    };
+                }
+            }._, .{ self, items });
+        } else {
+            try self.db.insertItems(items);
+        }
     }
 
     return items;
@@ -739,101 +764,20 @@ pub fn fetchThreadOfficial(self: *Self, allocator: Allocator, opID: ItemID) ![]I
         }
     }
 
-    const QueueEntry = struct {
-        id: ItemID,
-    };
-    var queue: std.ArrayList(QueueEntry) = .{};
+    var queue: std.ArrayList(ItemID) = .{};
     defer queue.deinit(allocator);
 
-    try queue.append(allocator, .{
-        .id = opID,
-    });
+    try queue.append(allocator, opID);
 
-    const SpawnContext = struct {
-        thread_id: usize,
-        entry: QueueEntry,
-        allocator: Allocator,
-        items: *std.ArrayList(Item),
-        queue: *std.ArrayList(QueueEntry),
-        hn: *Self,
-        err: *?anyerror,
-        queue_mu: *std.Thread.Mutex,
-        items_mu: *std.Thread.Mutex,
-    };
+    while (queue.items.len > 0) {
+        const items = try self.fetchAllItems(allocator, queue.items, .{ .write_cache = false });
+        defer allocator.free(items);
+        queue.clearRetainingCapacity();
 
-    var wg: std.Thread.WaitGroup = .{};
-    var result_mu: std.Thread.Mutex = .{};
-    var queue_mu: std.Thread.Mutex = .{};
-
-    // TODO: don't use threads here
-    var spawn_err: ?anyerror = null;
-    while (queue.items.len > 0 or !wg.isDone()) {
-        if (spawn_err != null)
-            break;
-
-        const entry = blk: {
-            queue_mu.lock();
-            defer queue_mu.unlock();
-            break :blk queue.pop();
-        } orelse continue;
-
-        const spawn_ctx = try allocator.create(SpawnContext);
-        spawn_ctx.* = SpawnContext{
-            .thread_id = opID,
-            .entry = entry,
-            .allocator = allocator,
-            .items = &result,
-            .queue = &queue,
-            .hn = self,
-            .err = &spawn_err,
-            .queue_mu = &queue_mu,
-            .items_mu = &result_mu,
-        };
-
-        self.thread_pool.spawnWg(&wg, struct {
-            fn _(ctx: *SpawnContext) void {
-                const id = ctx.entry.id;
-
-                defer ctx.allocator.destroy(ctx);
-
-                var item = ctx.hn.fetchItem(ctx.allocator, id) catch |err| {
-                    ctx.err.* = err;
-                    return;
-                };
-
-                item.thread_id = ctx.thread_id;
-
-                {
-                    ctx.items_mu.lock();
-                    defer ctx.items_mu.unlock();
-                    ctx.items.append(ctx.allocator, item) catch |err| {
-                        ctx.err.* = err;
-                        item.free(ctx.allocator);
-                        return;
-                    };
-                }
-
-                {
-                    ctx.queue_mu.lock();
-                    defer ctx.queue_mu.unlock();
-                    for (item.kids) |kid| {
-                        const next: QueueEntry = .{
-                            .id = kid,
-                        };
-                        ctx.queue.append(ctx.allocator, next) catch |err| {
-                            ctx.err.* = err;
-                            return;
-                        };
-                    }
-                }
-            }
-        }._, .{spawn_ctx});
-    }
-
-    wg.wait();
-
-    if (spawn_err) |err| {
-        return err;
+        try result.appendSlice(allocator, items);
+        for (items) |item| {
+            try queue.appendSlice(allocator, item.kids);
+        }
     }
 
     return result.toOwnedSlice(allocator);
@@ -860,7 +804,6 @@ pub fn fetchDiscussion(
     // TODO: ideally I should use the items from fetchThread
     // but I'll read again from db anyways for lazy reasons
     const temp_items: []const Item = try self.fetchThread(allocator, thread_id, .{});
-    std.debug.print("huh: {d}\n", .{temp_items.len});
     freeItems(allocator, temp_items);
 
     // try again
@@ -1558,6 +1501,8 @@ fn printStackTrace(trace_arg: ?*std.builtin.StackTrace) void {
     ) catch {};
 }
 
+const test_output = @import("build_options").test_output;
+
 test "fetch 1" {
     var ts_allocator: std.heap.ThreadSafeAllocator = .{
         .child_allocator = std.testing.allocator,
@@ -1590,9 +1535,8 @@ test "fetch:index" {
 
     const story_ids = try hn.fetchTopStoryIDs(allocator, 30, 0);
     defer allocator.free(story_ids);
-    std.debug.print("ids: {any}\n", .{story_ids});
 
-    const items: []const Item = try hn.fetchAllItems(allocator, story_ids[0..1], .{});
+    const items: []const Item = try hn.fetchAllItems(allocator, story_ids[0..1], .{ .write_cache = false });
     defer {
         for (items) |item| item.free(allocator);
         allocator.free(items);
@@ -1621,17 +1565,19 @@ test fetchThread {
     defer freeItems(allocator, items);
 
     var count: usize = 0;
-    for (items) |item| {
-        std.debug.print("> {d} {s} : {s} : {d}\n{s}\n--------\n", .{
-            item.id,
-            item.title,
-            item.by,
-            item.kids.len,
-            item.text,
-        });
-        count += 1;
+    if (test_output) {
+        for (items) |item| {
+            std.debug.print("> {d} {s} : {s} : {d}\n{s}\n--------\n", .{
+                item.id,
+                item.title,
+                item.by,
+                item.kids.len,
+                item.text,
+            });
+            count += 1;
+        }
+        std.debug.print("total num items: {d}\n", .{count});
     }
-    std.debug.print("total num items: {d}\n", .{count});
 }
 
 test fetchDiscussion {
@@ -1651,15 +1597,17 @@ test fetchDiscussion {
     defer freeItems(allocator, items);
 
     var count: usize = 0;
-    for (items) |item| {
-        std.debug.print("> {d} {s} : {s} : {d}\n{s}\n--------\n", .{
-            item.id,
-            item.title,
-            item.by,
-            item.kids.len,
-            item.text,
-        });
-        count += 1;
+    if (test_output) {
+        for (items) |item| {
+            std.debug.print("> {d} {s} : {s} : {d}\n{s}\n--------\n", .{
+                item.id,
+                item.title,
+                item.by,
+                item.kids.len,
+                item.text,
+            });
+            count += 1;
+        }
+        std.debug.print("total num items: {d}\n", .{count});
     }
-    std.debug.print("total num items: {d}\n", .{count});
 }
