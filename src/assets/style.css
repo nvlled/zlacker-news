@@ -36,7 +36,7 @@ a.replink {
 
 
 	background: #003333;
-	&:nth-child(odd) { background: #002520; }
+	&:nth-child(odd) { background: #002a29; }
 
 	a { word-break: break-all; }
 

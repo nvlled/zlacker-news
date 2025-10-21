@@ -843,6 +843,21 @@ pub fn fetchThread(
 
     std.sort.block(Item, @constCast(items), {}, compareItem);
 
+    if (items.len > 0 and items[0].id < opID) {
+        // handle case where op doesn't have the lowest ID,
+        // probably happens when dang moves an older post into the newer thread
+        const op_index = std.sort.binarySearch(Item, items, opID, struct {
+            fn _(id: ItemID, item: Item) std.math.Order {
+                return std.math.order(id, item.id);
+            }
+        }._);
+        if (op_index) |i| {
+            const temp = items[0];
+            items[0] = items[i];
+            items[i] = temp;
+        }
+    }
+
     std.log.debug("fetched thread {d}: got {d} items", .{ opID, items.len });
 
     if (options.wg) |wg| {
