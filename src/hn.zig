@@ -88,8 +88,8 @@ const Fetcher = struct {
             allocator.destroy(self.buf);
         }
 
-        pub fn getResponse(self: @This()) !?curl.Easy.Response {
-            const easy_handle = self.easy orelse return null;
+        pub fn getResponse(self: @This()) !curl.Easy.Response {
+            const easy_handle = self.easy.handle;
             var status_code: c_long = 0;
 
             try curl.checkCode(curl.libcurl.curl_easy_getinfo(
@@ -100,7 +100,7 @@ const Fetcher = struct {
 
             return .{
                 .handle = easy_handle,
-                .status_code = status_code,
+                .status_code = @intCast(status_code),
             };
         }
 
@@ -230,23 +230,28 @@ const Fetcher = struct {
     fn submit(self: *@This(), allocator: Allocator, args: struct {
         url: [:0]const u8,
         method: curl.Easy.Method = .GET,
+        body: ?[]const u8 = null,
+        headers: ?curl.Easy.Headers = null,
         wg: ?*std.Thread.WaitGroup = null,
     }) !Job {
         if (!self.running.load(.unordered)) {
             @panic("fetcher is not running, cannot submit job");
         }
 
-        var buf = std.Io.Writer.Allocating.init(allocator);
-        defer buf.deinit();
-
         var job: Fetcher.Job = try .init(allocator, args.wg);
         job.easy.ca_bundle = self.ca_bundle;
+
+        job.shared.wg.start();
+        errdefer job.shared.wg.finish();
+
         try job.easy.setUrl(args.url);
         try job.easy.setMethod(args.method);
         try job.easy.setWriter(&job.buf.writer);
 
-        job.shared.wg.start();
-        errdefer job.shared.wg.finish();
+        if (args.headers) |headers|
+            try job.easy.setHeaders(headers);
+        if (args.body) |body|
+            try job.easy.setPostFields(body);
 
         {
             self.queue_mu.lock();
@@ -1616,5 +1621,43 @@ test fetchDiscussion {
             count += 1;
         }
         std.debug.print("total num items: {d}\n", .{count});
+    }
+}
+
+fn percentEncodeStr(allocator: Allocator, str: []const u8) ![]const u8 {
+    var buf: std.Io.Writer.Allocating = .init(allocator);
+    try percentEncode(&buf.writer, str);
+    return buf.toOwnedSlice();
+}
+
+fn percentEncode(w: *std.Io.Writer, str: []const u8) !void {
+    for (str) |ch| {
+        const esc = switch (ch) {
+            ':' => "%3A",
+            '/' => "%2F",
+            '?' => "%3F",
+            '#' => "%23",
+            '[' => "%5B",
+            ']' => "%5D",
+            '@' => "%40",
+            '!' => "%21",
+            '$' => "%24",
+            '&' => "%26",
+            '\'' => "%27",
+            '(' => "%28",
+            ')' => "%29",
+            '*' => "%2A",
+            '+' => "%2B",
+            ',' => "%2C",
+            ';' => "%3B",
+            '=' => "%3D",
+            '%' => "%25",
+            ' ' => "+",
+            else => null,
+        };
+        if (esc) |c|
+            try w.writeAll(c)
+        else
+            try w.writeByte(ch);
     }
 }
