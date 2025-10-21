@@ -986,10 +986,17 @@ const DB = struct {
         op_id: ItemID,
     ) !?[]const Item {
         var result: std.ArrayList(Item) = .{};
-        errdefer {
-            for (result.items) |item| item.free(allocator);
+        var abort = false;
+        var op: ?Item = null;
+
+        defer if (abort) {
+            for (result.items) |item| {
+                item.free(allocator);
+            }
             result.deinit(allocator);
-        }
+        };
+
+        errdefer abort = true;
 
         const conn = self.pool.acquire();
         defer conn.release();
@@ -1071,12 +1078,22 @@ const DB = struct {
             }
 
             item = try item.dupe(allocator);
-            errdefer item.free(allocator);
 
-            try result.append(allocator, item);
+            if (item.id == op_id) {
+                // store op separately to make sure it's always
+                // first since there cases
+                // where op's id and time is less than other posts
+                op = item;
+            } else {
+                errdefer item.free(allocator);
+                try result.append(allocator, item);
+            }
         }
 
+        if (op) |item| try result.append(allocator, item);
+
         if (result.items.len == 0 or result.items.len < result.items[0].descendants) {
+            abort = true;
             return null;
         }
 

@@ -340,8 +340,6 @@ fn encodeName(arena: Allocator, item: HN.Item, base_id: u64) ![]const u8 {
         return sprintf(arena, "{s}+(OP)", .{by});
     }
 
-    // huh for some really strange reason, some items has an id < than parent or ancestor id
-    // why does that happen? Maybe it's a post that was moved from elsewhere.
     const id = try encodeID(arena, if (item.id >= base_id) item.id - base_id else item.id);
     defer arena.free(id);
     return sprintf(arena, "{s}+{s}", .{ by, id });
