@@ -417,9 +417,6 @@ pub fn fetch(self: *Self, allocator: Allocator, url: [:0]const u8) ![]const u8 {
     std.log.debug("fetching url {s}", .{url});
     defer std.log.debug("fetched url {s}", .{url});
 
-    var buf = std.Io.Writer.Allocating.init(allocator);
-    defer buf.deinit();
-
     var job = try self.fetcher.submit(allocator, .{
         .method = .GET,
         .url = url,
@@ -442,9 +439,6 @@ pub fn fetchAsync(
 ) !Fetcher.Job {
     std.log.debug("fetching url {s}", .{url});
     defer std.log.debug("fetched url {s}", .{url});
-
-    var buf = std.Io.Writer.Allocating.init(allocator);
-    defer buf.deinit();
 
     const job = try self.fetcher.submit(allocator, .{
         .method = .GET,
