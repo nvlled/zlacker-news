@@ -98,13 +98,13 @@ pub fn render(ctx: *RequestContext, data: Data) !void {
         try z.a.attrf(arena, .href, "https://news.ycombinator.com/item?id={d}", .{op.id});
         z.a.render("[source]");
 
-        z.a.attr(.href, "#bottom");
-        z.a.render("[go to bottom]");
-
         if (!data.with_links_only) {
             try z.a.attrf(arena, .href, "/item?id={d}&links=ye", .{op.id});
             z.a.render("[links]");
         }
+
+        z.a.attr(.href, "#bottom");
+        z.a.render("[go to bottom]");
 
         if (op.text.len > 0) {
             z.p.@"<>"();

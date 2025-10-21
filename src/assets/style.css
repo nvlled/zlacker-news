@@ -30,11 +30,13 @@ a.replink {
 }
 
 .item {
-	padding: 10px;
-	margin-bottom: 5px;
-	&.op { margin-bottom: 1px };
+	padding: 4px;
+	margin-bottom: 7px;
+	&.op { margin-bottom: 10px };
 
-	&:nth-child(odd) { background: #002e2e; }
+
+	background: #003333;
+	&:nth-child(odd) { background: #002520; }
 
 	a { word-break: break-all; }
 
@@ -51,8 +53,8 @@ a.replink {
 	}
 
 	.header {
-		margin-top: 20px;
-		margin-bottom: 5px;
+		margin-top: 2px;
+		margin-bottom: 2px;
 	}
 
 	.margin {
