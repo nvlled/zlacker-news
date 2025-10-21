@@ -1209,7 +1209,6 @@ const DB = struct {
             \\  inserted
             \\FROM hn_items
             \\WHERE id IN ({s})
-            \\ORDER BY time DESC
         , .{getBindString(ids.len)});
         defer allocator.free(query);
 

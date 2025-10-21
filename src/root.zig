@@ -144,6 +144,16 @@ const Controllers = struct {
             wg.wait();
             HN.freeItems(allocator, items);
         }
+        std.sort.block(
+            HN.Item,
+            @constCast(items),
+            {},
+            struct {
+                fn _(_: void, a: HN.Item, b: HN.Item) bool {
+                    return a.time > b.time;
+                }
+            }._,
+        );
 
         ctx.res.header("Content-Type", "text/html");
         try @import("./pages/index.zig").render(ctx, .{
