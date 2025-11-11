@@ -57,6 +57,10 @@ a.replink {
 		margin-bottom: 2px;
 	}
 
+	.body {
+		word-break: break-word;
+	}
+
 	.margin {
 		margin-right: 2px;
 		display: inline-block;
@@ -69,23 +73,14 @@ a.replink {
 		);
 	}
 
-	.depth-1  { width: 10px; }
-	.depth-2  { width: 20px; }
-	.depth-3  { width: 30px; }
-	.depth-4  { width: 40px; }
-	.depth-5  { width: 50px; }
-	.depth-6  { width: 60px; }
-	.depth-7  { width: 70px; }
-	.depth-8  { width: 80px; }
-	.depth-9  { width: 90px; }
-	.depth-10 { width: 100px; }
-	.depth-11 { width: 120px; }
-	.depth-12 { width: 130px; }
-	.depth-13 { width: 140px; }
-	.depth-14 { width: 150px; }
-	.depth-15 { width: 160px; }
-	.depth-16 { width: 170px; }
-	.depth-17 { width: 180px; }
-	.depth-18 { width: 190px; }
-	.depth-19 { width: 200px; }
+	.depth {
+		letter-spacing: -3px;
+		display: inline-block;
+	}
+}
+
+
+.custom-nav {
+	background: red;
+	position: absolute;
 }

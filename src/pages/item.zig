@@ -33,6 +33,15 @@ const hn_link: rrrr.RE = &.concat(&.{
     &.literal("</a>"),
 });
 
+const depth_symbols: []const []const u8 = &.{
+    "▥", "◧", "◩", "◪", "◨", "◫", "◰", "◱", "▩",
+    "■", "▢", "▣", "▦", "▧", "▨", "◲", "◳", "◻",
+    "◼", "◽", "◾", "⚿", "⛋", "⧯", "⬒", "⬓", "⬔",
+    "⬕", "⬚", "⬛", "⬜", "⧄", "⧅", "⧆", "⧇", "⧈",
+    "⧉", "⧠", "⧮", "⛝", "⛞", "⛶", "⛾", "⟎", "⟏",
+    "⟤", "⟥", "⯀", "⯐", "■",
+};
+
 pub fn render(ctx: *RequestContext, data: Data) !void {
     const z = ctx.zhtml;
     const layout: Layout = .{ .ctx = ctx };
@@ -169,8 +178,12 @@ pub fn render(ctx: *RequestContext, data: Data) !void {
             {
                 z.div.@"<>"();
                 {
-                    z.div.attr(.class, try sprintf(arena, "margin depth-{d}", .{item.depth}));
-                    z.div.render("");
+                    z.div.attr(.class, "depth");
+                    z.div.@"<>"();
+                    for (0..item.depth) |i| {
+                        z.write(depth_symbols[i % depth_symbols.len]);
+                    }
+                    z.div.@"</>"();
 
                     const name = try encodeName(arena, item, replyLink.base_id);
                     try z.print(arena, "{d}. {s}", .{
@@ -228,6 +241,7 @@ pub fn render(ctx: *RequestContext, data: Data) !void {
             }
             z.div.@"</>"();
 
+            z.attr(.class, "body");
             z.div.@"<>"();
             if (item.parent) |p| {
                 if (lookup.get(p)) |parent| {
