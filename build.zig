@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 // Although this function looks imperative, it does not perform the build
 // directly and instead it mutates the build graph (`b`) that will be then
@@ -22,13 +23,16 @@ pub fn build(b: *std.Build) void {
     // Standard optimization options allow the person running `zig build` to select
     // between Debug, ReleaseSafe, ReleaseFast, and ReleaseSmall. Here we do not
     // set a preferred release mode, allowing the user to decide how to optimize.
-    const optimize = b.standardOptimizeOption(.{});
+    const optimize: std.builtin.OptimizeMode = b.standardOptimizeOption(.{});
     // It's also possible to define more custom flags to toggle optional features
     // of this build script using `b.option()`. All defined flags (including
     // target and optimize options) will be listed when running `zig build --help`
     // in this directory.
 
+    const link_vendor = optimize != .Debug;
+
     const curl = b.dependency("curl", .{
+        .link_vendor = link_vendor,
         .target = target,
         .optimize = optimize,
     });
@@ -78,7 +82,19 @@ pub fn build(b: *std.Build) void {
             .{ .name = "curl", .module = curl.module("curl") },
         },
     });
-    mod.linkSystemLibrary("sqlite3", .{});
+
+    if (!link_vendor) {
+        // use system libs on debug mode so that -fincremental works
+        mod.linkSystemLibrary("sqlite3", .{});
+
+        // NOTE: for curl, use libcurl4-openssl-dev
+        // instead of libcurl4-gnutls-dev if the following error occurs:
+        // curl err code:4, msg:A requested feature, protocol or option was not found built-in in this libcurl due to a build-time decision.
+        mod.linkSystemLibrary("curl", .{});
+
+        mod.link_libc = true;
+    }
+
     mod.addOptions("build_options", options);
 
     // Here we define an executable. An executable needs to have a root module
@@ -121,8 +137,6 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-
-    exe.linkLibC();
 
     // This declares intent for the executable to be installed into the
     // install prefix when running `zig build` (i.e. when executing the default

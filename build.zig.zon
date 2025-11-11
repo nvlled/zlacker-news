@@ -44,16 +44,17 @@
             .url = "git+https://github.com/rockorager/zeit#ade14edb2025f5e4a57b683f81c915f70a904e88",
             .hash = "zeit-0.6.0-5I6bk7V8AgAY0-hM-vUYtKZUFYhXct-VRkqISNNTfEfb",
         },
-        .zqlite = .{
-            .path = "vendor/zqlite.zig",
-        },
         .rrrr = .{
             .url = "git+https://github.com/nvlled/rrrr.git#9a3261300c6f1c6def4a57b35ac9bc1b5dcca927",
             .hash = "rrrr-0.0.0-wROJJNn8AQC5AYEgttQYDxFWzlOyw65VWf1VEPyGQ88W",
         },
         .curl = .{
-            .url = "https://github.com/jiacai2050/zig-curl/archive/refs/tags/v0.3.2.zip",
-            .hash = "curl-0.3.2-P4tT4SXPAACuV6f5eyh4jG_1SspjWwMm_vRJfoKrQep5",
+            .url = "git+https://github.com/jiacai2050/zig-curl#92db14ccdf58ee853c31564f3bdca265e3fc7dfe",
+            .hash = "curl-0.3.2-P4tT4XHoAAAN71krRGKGqMAi1tlwRi6dY5t8dDJWowJp",
+        },
+        .zqlite = .{
+            .url = "git+https://github.com/karlseguin/zqlite.zig#e3b6972230ccb1d2069e1ff298699d73b3180b3c",
+            .hash = "zqlite-0.0.0-RWLaY-C4mADQvgmoLhHD-cHtCgKYdQNAoqASip2uJzBL",
         },
     },
     .paths = .{
