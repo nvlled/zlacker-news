@@ -5,6 +5,7 @@ const sprintf = std.fmt.allocPrint;
 const HN = @import("../hn.zig");
 const Zhtml = @import("zhtml");
 const Layout = @import("./layout.zig");
+const Assets = @import("../assets.zig");
 const RequestContext = @import("../context.zig");
 const rrrr = @import("rrrr");
 
@@ -34,11 +35,10 @@ const hn_link: rrrr.RE = &.concat(&.{
 });
 
 const depth_symbols: []const []const u8 = &.{
-    "▥", "◧", "◩", "◪", "◨", "◫", "◰", "◱", "▩",
-    "■", "▢", "▣", "▦", "▧", "▨", "◲", "◳", "◻",
-    "◼", "◽", "◾", "⚿", "⛋", "⧯", "⬒", "⬓", "⬔",
-    "⬕", "⬚", "⬛", "⬜", "⧄", "⧅", "⧆", "⧇", "⧈",
-    "⧉", "⧠", "⧮", "⛝", "⛞", "⛶", "⛾", "⟎", "⟏",
+    "◧", "◩", "◪", "◨", "⬒", "⬓", "⬔", "⧯",
+    "▣", "▦", "▧", "▨", "◲", "◳", "⚿", "⛋",
+    "⬕", "⬚", "⧄", "⧅", "⧆", "⧇", "⧈", "⧉",
+    "⧠", "⧮", "⛝", "⛞", "⛶", "⛾", "⟎", "⟏",
     "⟤", "⟥", "⯀", "⯐", "■",
 };
 
@@ -179,6 +179,7 @@ pub fn render(ctx: *RequestContext, data: Data) !void {
                 z.div.@"<>"();
                 {
                     z.div.attr(.class, "depth");
+                    try z.div.attrf(arena, .title, "post depth: {d}", .{item.depth});
                     z.div.@"<>"();
                     for (0..item.depth) |i| {
                         z.write(depth_symbols[i % depth_symbols.len]);
@@ -286,6 +287,7 @@ pub fn render(ctx: *RequestContext, data: Data) !void {
         }
         z.div.@"</>"();
     }
+
     z.a.attr(.id, "bottom");
     z.a.attr(.href, "#top");
     z.a.render("[go to top]");

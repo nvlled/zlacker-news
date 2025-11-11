@@ -3,14 +3,14 @@
 // To regenerate, run: zig build gen-assetl
 
 pub const Names = enum {
-    @"/assets/script.js",
     @"/assets/style.css",
+    @"/assets/custom-nav.js",
 };
 
 pub fn getData(t: Names) []const u8 {
     return switch (t) {
-        .@"/assets/script.js" => @embedFile("./assets/script.js"),
         .@"/assets/style.css" => @embedFile("./assets/style.css"),
+        .@"/assets/custom-nav.js" => @embedFile("./assets/custom-nav.js"),
     };
 }
 
@@ -18,4 +18,4 @@ pub fn link(t: Names) []const u8 {
     return @tagName(t);
 }
 
-pub const max_name_len = 17;
+pub const max_name_len = 21;

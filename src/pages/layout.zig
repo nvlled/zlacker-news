@@ -27,9 +27,16 @@ pub fn begin(self: @This(), attrs: Attrs) !void {
         z.meta.attr(.charset, "utf-8");
         z.meta.render();
 
+        z.meta.attr(.name, "viewport");
+        z.meta.attr(.content, "width=device-width,initial-scale=1");
+        z.meta.render();
+
         z.link.attr(.rel, "stylesheet");
         z.link.attr(.href, Assets.link(.@"/assets/style.css"));
         z.link.render();
+
+        z.script.attr(.src, Assets.link(.@"/assets/custom-nav.js"));
+        z.script.render("");
     }
     z.head.@"</>"();
     z.body.@"<>"();

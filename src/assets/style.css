@@ -76,11 +76,27 @@ a.replink {
 	.depth {
 		letter-spacing: -3px;
 		display: inline-block;
+		color: #007744;
 	}
 }
 
 
-.custom-nav {
-	background: red;
-	position: absolute;
+#custom-nav {
+	position: fixed;
+	left: 0;
+	right: 0;
+	bottom: 0;
+	margin-inline: auto;
+	width: fit-content;
+
+	button {
+		background: #003333;
+		color: white;
+	}
+
+	.spacer {
+		display: inline-block;
+		text-align: center;
+		width: 20px;
+	}
 }
