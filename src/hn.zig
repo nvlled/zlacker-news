@@ -920,11 +920,19 @@ const DB = struct {
     const db_filename = "zlacker.db";
 
     pub fn init(allocator: Allocator, pool_size: usize) !@This() {
+        const pool: *zqlite.Pool = try .init(allocator, .{
+            .path = db_filename,
+            .size = pool_size,
+        });
+
+        for (pool.conns) |conn| {
+            try conn.execNoArgs(
+                \\PRAGMA journal_mode=WAL
+            );
+        }
+
         return .{
-            .pool = try .init(allocator, .{
-                .path = db_filename,
-                .size = pool_size,
-            }),
+            .pool = pool,
         };
     }
 
@@ -936,7 +944,6 @@ const DB = struct {
         const conn = self.pool.acquire();
         defer conn.release();
 
-        try conn.execNoArgs("PRAGMA journal_mode=WAL2");
         try conn.transaction();
         defer conn.commit() catch unreachable;
         errdefer conn.rollback();
@@ -1355,7 +1362,6 @@ const DB = struct {
         defer conn.release();
         try conn.busyTimeout(1000 * 10);
 
-        try conn.execNoArgs("PRAGMA journal_mode=WAL2");
         try conn.transaction();
         defer conn.commit() catch unreachable;
         errdefer conn.rollback();
@@ -1456,6 +1462,8 @@ const DB = struct {
             \\  UNIQUE (item_id, reply_id) ON CONFLICT IGNORE
             \\);
             \\
+            \\CREATE INDEX IF NOT EXISTS idx_item_replies_id ON hn_item_replies(item_id);
+            \\
             \\CREATE TABLE IF NOT EXISTS hn_items(
             \\  id INTEGER PRIMARY KEY,
             \\  username VARCHAR(16),
@@ -1473,8 +1481,14 @@ const DB = struct {
             \\  inserted INTEGER,
             \\
             \\  FOREIGN KEY (parent_id) references hn_items(id)
+            \\     ON DELETE CASCADE,
+            \\
             \\  FOREIGN KEY (thread_id) references hn_items(id)
+            \\     ON DELETE CASCADE
             \\);
+            \\
+            \\CREATE INDEX IF NOT EXISTS idx_items_parent_id ON hn_items(parent_id);
+            \\CREATE INDEX IF NOT EXISTS idx_items_thread_id ON hn_items(thread_id);
         );
     }
 
@@ -1487,7 +1501,7 @@ const DB = struct {
                     db.removePastLimit() catch |err| {
                         std.log.err("failed to remove old items: {any}", .{err});
                     };
-                    std.Thread.sleep(1e9 * 60 * 30);
+                    std.Thread.sleep(1e9 * 60 * 60);
                 }
             }
         }.loop, .{self});
@@ -1500,19 +1514,24 @@ const DB = struct {
         defer conn.release();
         errdefer std.log.err("{s}", .{conn.lastError()});
 
-        const row = try conn.row(
-            \\ SELECT inserted FROM hn_items
-            \\ ORDER BY inserted DESC
-            \\ LIMIT ? OFFSET ?;
-        , .{ items_limit, items_limit }) orelse return;
-        defer row.deinit();
+        try conn.execNoArgs("");
+        try conn.execNoArgs(
+            \\PRAGMA foreign_keys = ON;
+            \\DELETE FROM hn_items
+            \\WHERE id=thread_id AND unixepoch() - inserted > 5;
+            \\PRAGMA foreign_keys = OFF;
+        );
 
-        const inserted: ItemID = @intCast(row.int(0));
+        const opt_row = try conn.row(
+            \\SELECT changes();
+        , .{});
 
-        try conn.exec(
-            \\ DELETE FROM hn_items
-            \\ WHERE inserted < ?;
-        , .{inserted});
+        if (opt_row) |row| {
+            defer row.deinit();
+
+            const num_deleted = row.int(0);
+            std.log.debug("deleted {d} threads", .{num_deleted});
+        }
     }
 };
 
