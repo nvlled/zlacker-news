@@ -1024,7 +1024,25 @@ const DB = struct {
 
         errdefer std.log.err("failed to read item: {s}", .{conn.lastError()});
 
-        var rows = try conn.rows(
+        const is_thread_root = blk: {
+            const thread_root_row = try conn.row(
+                \\SELECT 1 FROM hn_items WHERE id = ? AND thread_id = id
+            , .{op_id});
+            defer if (thread_root_row) |row| {
+                _ = row.int(0);
+                row.deinit();
+            };
+            break :blk thread_root_row != null;
+        };
+
+        std.debug.print("is thread: {d} {any}\n", .{ op_id, is_thread_root });
+
+        const query = if (is_thread_root)
+            \\SELECT id, username, score, title, url, descendants, time, text,
+            \\       deleted, dead, parent_id, thread_id, depth, inserted
+            \\FROM hn_items WHERE id = ?1 OR thread_id = ?1
+            \\ORDER BY id DESC;
+        else
             \\WITH RECURSIVE
             \\    thread(
             \\            id, username, score, title, url, descendants, time, text,
@@ -1044,7 +1062,9 @@ const DB = struct {
             \\          ON t.parent_id = thread.id
             \\    )
             \\SELECT * from thread ORDER BY id DESC;
-        , .{op_id});
+        ;
+
+        var rows = try conn.rows(query, .{op_id});
         defer rows.deinit();
 
         var reply_ids: std.AutoArrayHashMapUnmanaged(ItemID, *std.ArrayList(ItemID)) = .{};
