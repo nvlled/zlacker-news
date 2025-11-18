@@ -927,7 +927,8 @@ const DB = struct {
 
         for (pool.conns) |conn| {
             try conn.execNoArgs(
-                \\PRAGMA journal_mode=WAL
+                \\PRAGMA journal_mode=WAL;
+                \\PRAGMA foreign_keys = ON;
             );
         }
 
@@ -945,7 +946,9 @@ const DB = struct {
         defer conn.release();
 
         try conn.transaction();
-        defer conn.commit() catch unreachable;
+        defer conn.commit() catch {
+            std.log.err("failed to commit insertFeed: {s}", .{conn.lastError()});
+        };
         errdefer conn.rollback();
 
         errdefer std.log.err("failed to read item: {s}", .{conn.lastError()});
@@ -1469,7 +1472,6 @@ const DB = struct {
             \\  item_id INTEGER,
             \\  inserted INTEGER,
             \\
-            \\  FOREIGN KEY (item_id) references hn_items(id),
             \\  UNIQUE (feed, num) ON CONFLICT REPLACE
             \\);
             \\
@@ -1534,12 +1536,9 @@ const DB = struct {
         defer conn.release();
         errdefer std.log.err("{s}", .{conn.lastError()});
 
-        try conn.execNoArgs("");
         try conn.execNoArgs(
-            \\PRAGMA foreign_keys = ON;
             \\DELETE FROM hn_items
-            \\WHERE id=thread_id AND unixepoch() - inserted > 5;
-            \\PRAGMA foreign_keys = OFF;
+            \\WHERE thread_id IS NULL AND unixepoch() - inserted > 84600 * 2;
         );
 
         const opt_row = try conn.row(
