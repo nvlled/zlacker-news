@@ -17,11 +17,11 @@ pub fn begin(self: @This(), attrs: Attrs) !void {
     z.head.@"<>"();
     {
         z.title.@"<>"();
-        z.write("zlacker");
         if (attrs.title) |title| if (title.len > 0) {
-            z.write(" - ");
             z.write(title);
+            z.write(" - ");
         };
+        z.write("zlacker");
         z.title.@"</>"();
 
         z.meta.attr(.charset, "utf-8");

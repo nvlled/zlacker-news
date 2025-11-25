@@ -65,16 +65,14 @@ pub fn render(ctx: *RequestContext, data: Data) !void {
 
     try layout.begin(.{ .title = op.title });
 
-    z.div.attrs(.{
-        .id = try sprintf(arena, "{d}", .{op.id}),
-        .class = "op item",
-    });
+    try z.div.attrf(.id, "{d}", .{op.id});
+    z.div.attr(.class, "op item");
     z.div.@"<>"();
 
     if (data.discussion_mode) {
         z.div.@"<>"();
-        try z.a.attrf(arena, .href, "/item?id={d}", .{op.id});
-        try z.a.renderf(arena, "[return to \"{s}\"]", .{op.title});
+        try z.a.attrf(.href, "/item?id={d}", .{op.id});
+        try z.a.renderf("[return to \"{s}\"]", .{op.title});
         z.div.@"</>"();
     } else if (op.parent == null) {
         z.h1.@"<>"();
@@ -84,31 +82,32 @@ pub fn render(ctx: *RequestContext, data: Data) !void {
         }
         z.h1.@"</>"();
 
-        const dt = try formatDateTime(arena, op.time);
-        const name = try encodeName(arena, op, op.id);
-        try z.print(
-            arena,
-            "submitted by {s} on {s} | {d} points {d} comments",
-            .{
-                name,
-                dt,
-                op.score,
-                items.len - 1,
-            },
-        );
-        arena.free(name);
-        arena.free(dt);
+        {
+            const dt = try formatDateTime(arena, op.time);
+            const name = try encodeName(arena, op, op.id);
+            try z.print(
+                "submitted by {s} on {s} | {d} points {d} comments",
+                .{
+                    name,
+                    dt,
+                    op.score,
+                    items.len - 1,
+                },
+            );
+            arena.free(name);
+            arena.free(dt);
+        }
 
         z.br.render();
         if (op.url) |url| {
             z.a.attr(.href, url);
             z.a.render("[view article]");
         }
-        try z.a.attrf(arena, .href, "https://news.ycombinator.com/item?id={d}", .{op.id});
+        try z.a.attrf(.href, "https://news.ycombinator.com/item?id={d}", .{op.id});
         z.a.render("[source]");
 
         if (!data.with_links_only) {
-            try z.a.attrf(arena, .href, "/item?id={d}&links=ye", .{op.id});
+            try z.a.attrf(.href, "/item?id={d}&links=ye", .{op.id});
             z.a.render("[links]");
         }
 
@@ -124,7 +123,7 @@ pub fn render(ctx: *RequestContext, data: Data) !void {
         z.div.@"<>"();
         if (op.kids.len > 0 and !data.with_links_only) {
             z.small.@"<>"();
-            try z.print(arena, "replies({d}): ", .{op.kids.len});
+            try z.print("replies({d}): ", .{op.kids.len});
             z.small.@"</>"();
 
             z.span.attr(.class, "reply-links");
@@ -141,11 +140,11 @@ pub fn render(ctx: *RequestContext, data: Data) !void {
         z.div.@"</>"();
     } else {
         if (op.thread_id) |tid| {
-            try z.a.attrf(arena, .href, "/item?id={d}", .{op.parent.?});
+            try z.a.attrf(.href, "/item?id={d}", .{op.parent.?});
             z.a.render("[parent]");
-            try z.a.attrf(arena, .href, "/item?id={d}", .{tid});
+            try z.a.attrf(.href, "/item?id={d}", .{tid});
             z.a.render("[thread]");
-            try z.print(arena, " {d} comments", .{items.len - 1});
+            try z.print(" {d} comments", .{items.len - 1});
         }
     }
 
@@ -153,7 +152,7 @@ pub fn render(ctx: *RequestContext, data: Data) !void {
         z.div.@"<>"();
         z.br.render();
         z.em.render("NOTE: showing posts with links only");
-        try z.a.attrf(arena, .href, "/item?id={d}", .{op.id});
+        try z.a.attrf(.href, "/item?id={d}", .{op.id});
         z.a.render("show all posts");
         z.div.@"</>"();
     }
@@ -179,7 +178,7 @@ pub fn render(ctx: *RequestContext, data: Data) !void {
                 z.div.@"<>"();
                 {
                     z.div.attr(.class, "depth");
-                    try z.div.attrf(arena, .title, "post depth: {d}", .{item.depth});
+                    try z.div.attrf(.title, "post depth: {d}", .{item.depth});
                     z.div.@"<>"();
                     for (0..item.depth) |i| {
                         z.write(depth_symbols[i % depth_symbols.len]);
@@ -187,18 +186,18 @@ pub fn render(ctx: *RequestContext, data: Data) !void {
                     z.div.@"</>"();
 
                     const name = try encodeName(arena, item, replyLink.base_id);
-                    try z.print(arena, "{d}. {s}", .{
+                    try z.print("{d}. {s}", .{
                         n + 1,
                         name,
                     });
                     arena.free(name);
 
-                    try z.a.attrf(arena, .href, "/item?id={d}", .{item.id});
+                    try z.a.attrf(.href, "/item?id={d}", .{item.id});
                     z.a.render("[view]");
-                    try z.a.attrf(arena, .href, "https://news.ycombinator.com/item?id={d}", .{item.id});
+                    try z.a.attrf(.href, "https://news.ycombinator.com/item?id={d}", .{item.id});
                     z.a.render("[source]");
                     if (item.depth >= 2 and item.thread_id != null and !data.discussion_mode) {
-                        try z.a.attrf(arena, .href, "/item/discussion?id={d}&tid={d}", .{ item.id, item.thread_id.? });
+                        try z.a.attrf(.href, "/item/discussion?id={d}&tid={d}", .{ item.id, item.thread_id.? });
                         z.a.render("[discussion]");
                     }
 
@@ -259,8 +258,8 @@ pub fn render(ctx: *RequestContext, data: Data) !void {
                 while (link_search.next(ctx.allocator)) |m| {
                     z.@"writeUnsafe!?"(link_search.skippedString(item.text));
                     if (m.capture) |cap| {
-                        try z.a.attrf(arena, .href, "/item?id={s}", .{cap.string(item.text)});
-                        try z.a.renderf(arena, ">>{s}", .{cap.string(item.text)});
+                        try z.a.attrf(.href, "/item?id={s}", .{cap.string(item.text)});
+                        try z.a.renderf(">>{s}", .{cap.string(item.text)});
                     }
                 }
                 z.@"writeUnsafe!?"(link_search.skippedString(item.text));
@@ -270,7 +269,7 @@ pub fn render(ctx: *RequestContext, data: Data) !void {
 
             if (item.kids.len > 0 and !data.with_links_only) {
                 z.small.@"<>"();
-                try z.print(arena, "replies({d}): ", .{item.kids.len});
+                try z.print("replies({d}): ", .{item.kids.len});
                 z.small.@"</>"();
 
                 z.span.attr(.class, "reply-links");
@@ -343,7 +342,7 @@ const ReplyLink = struct {
         });
 
         z.a.@"<>"();
-        try z.print(arena, ">>{s}", .{name});
+        try z.print(">>{s}", .{name});
         z.a.@"</>"();
     }
 };
