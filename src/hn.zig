@@ -1503,15 +1503,19 @@ const DB = struct {
             \\  inserted INTEGER,
             \\
             \\  FOREIGN KEY (parent_id) references hn_items(id)
-            \\     ON DELETE CASCADE,
-            \\
-            \\  FOREIGN KEY (thread_id) references hn_items(id)
             \\     ON DELETE CASCADE
             \\);
             \\
             \\CREATE INDEX IF NOT EXISTS idx_items_parent_id ON hn_items(parent_id);
             \\CREATE INDEX IF NOT EXISTS idx_items_thread_id ON hn_items(thread_id);
         );
+
+        // NOTE: There are cases where an item is included with a different thread id,
+        // probably a peculiar behaviour by algolia API.
+        // This breaks foreign key constraint, so remove this constraint
+        // as a workaround.
+        //\\  FOREIGN KEY (thread_id) references hn_items(id)
+        //\\     ON DELETE CASCADE
     }
 
     pub fn startCleaner(self: @This()) !void {
