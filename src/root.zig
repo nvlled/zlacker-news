@@ -9,54 +9,193 @@ const RequestContext = @import("./context.zig");
 
 const Action = *const fn (*RequestContext) anyerror!void;
 
+const routes = .{
+    .@"/" = @import("./pages/index.zig").serve,
+    .@"/item" = @import("./pages/item.zig").serveItem,
+    .@"/item/discussion" = @import("./pages/item.zig").serveDiscussion,
+};
+
+const RoutePath = std.meta.FieldEnum(@TypeOf(routes));
+
 const Handler = struct {
     hn: *HN,
     allocator: std.mem.Allocator,
     thread_pool: ?*std.Thread.Pool = null,
 
-    pub fn dispatch(app: *const Handler, action: Action, req: *httpz.Request, res: *httpz.Response) !void {
-        var zhtml: Zhtml = try .init(res.writer(), res.arena);
-        defer {
-            std.debug.print("{s}\n", .{zhtml.getErrorTrace() orelse ""});
-            zhtml.deinit(res.arena);
+    page404: []const u8 = "Not found",
+    page500: []const u8 = "Internal server error",
+
+    pub fn handle(app: Handler, req: *httpz.Request, res: *httpz.Response) void {
+        handleRoute(app, req, res) catch |err| {
+            switch (err) {
+                error.PageNotFound => handleNotFound(app, req, res) catch {},
+                else => handleInternalError(app, err, req, res),
+            }
+        };
+    }
+
+    pub fn handleRoute(app: Handler, req: *httpz.Request, res: *httpz.Response) !void {
+        if (std.meta.stringToEnum(RoutePath, req.url.path)) |route_path| {
+            try handlePage(app, route_path, req, res);
+            if (@import("builtin").mode == .Debug) {
+                try PageReloader.injectReloadScript(res);
+            }
+
+            return;
         }
 
+        if (std.mem.startsWith(u8, req.url.path, "/assets/")) {
+            return handleAsset(req, res);
+        }
+
+        if (@import("builtin").mode == .Debug) {
+            if (std.mem.eql(u8, req.url.path, PageReloader.route_path)) {
+                try PageReloader.serveWatchStream(req, res);
+            }
+        }
+
+        try handleNotFound(app, req, res);
+    }
+
+    fn handleInternalError(
+        app: Handler,
+        err: anyerror,
+        req: *httpz.Request,
+        res: *httpz.Response,
+    ) void {
+        res.status = 500;
+        res.header("Content-Type", "text/html");
+        res.writer().writeAll(app.page500) catch {};
+
+        if (@import("builtin").mode == .Debug) {
+            PageReloader.injectReloadScript(res) catch {};
+        }
+
+        if (@errorReturnTrace()) |trace| std.debug.dumpStackTrace(trace.*);
+        std.log.err("an error occured while serving page {s}: {any}", .{
+            req.url.path,
+            err,
+        });
+    }
+
+    fn handleNotFound(
+        app: Handler,
+        _: *httpz.Request,
+        res: *httpz.Response,
+    ) !void {
+        res.status = 404;
+        res.header("Content-Type", "text/html");
+        res.writer().writeAll(app.page404) catch {};
+
+        if (@import("builtin").mode == .Debug) {
+            try PageReloader.injectReloadScript(res);
+        }
+    }
+
+    fn handlePage(
+        app: Handler,
+        route_path: RoutePath,
+        req: *httpz.Request,
+        res: *httpz.Response,
+    ) !void {
+        var zhtml: Zhtml = try .init(res.writer(), res.arena);
+        defer {
+            if (zhtml.getErrorTrace()) |trace| std.debug.print("{s}\n", .{trace});
+            zhtml.deinit(res.arena);
+        }
+        defer res.writer().flush() catch {};
+
         var ctx = RequestContext{
-            .hn = app.hn,
             .zhtml = &zhtml,
+            .hn = app.hn,
             .req = req,
             .res = res,
             .allocator = app.allocator,
             .thread_pool = app.thread_pool,
         };
 
-        std.debug.print("[request] {s}\n", .{req.url.raw});
+        const handler = getRouteHandler(route_path);
 
-        return action(&ctx) catch |err| {
-            ctx.res.status = 500;
-            ctx.res.header("Content-Type", "text/html");
-            if (@import("builtin").mode == .Debug) {
-                if (@errorReturnTrace()) |trace| {
-                    var w = res.writer();
-                    try w.writeAll("<br><pre style='color: red; background: #222'><h1>Error</h1>");
-                    try std.debug.writeStackTrace(trace.*, w, try std.debug.getSelfDebugInfo(), .no_color);
-                    try w.writeAll("<pre>");
-
-                    var stdout = std.fs.File.stdout().writer(&.{});
-                    w = &stdout.interface;
-                    try std.debug.writeStackTrace(trace.*, w, try std.debug.getSelfDebugInfo(), .escape_codes);
-                }
-                return err;
-            } else {
-                res.body = "a disturbance in the air, something went wrong";
-            }
+        ctx.res.header("Content-Type", "text/html");
+        handler(&ctx) catch |err| {
+            return err;
         };
+
+        try zhtml.getError();
     }
 
     pub fn uncaughtError(_: *Handler, req: *httpz.Request, res: *httpz.Response, err: anyerror) void {
         std.log.info("500 {} {s} {}", .{ req.method, req.url.path, err });
         res.status = 500;
         res.body = "nope";
+    }
+
+    fn handleAsset(req: *httpz.Request, res: *httpz.Response) !void {
+        const path = req.url.path;
+        const filename = path[0..@min(path.len, Assets.max_name_len)];
+
+        const t: Assets.Names = std.meta.stringToEnum(Assets.Names, filename) orelse {
+            res.status = 404;
+            return error.AssetNotFound;
+        };
+
+        const data = Assets.getData(t);
+        const file_ext = std.fs.path.extension(filename);
+
+        if (Ext2mime.get(file_ext)) |mime_type| {
+            res.header("Content-Type", mime_type);
+        }
+
+        res.body = data;
+    }
+
+    fn getRouteHandler(route_path: RoutePath) Action {
+        return switch (route_path) {
+            inline else => |x| @field(routes, @tagName(x)),
+        };
+    }
+};
+
+const PageReloader = struct {
+    const reload_script =
+        \\
+        \\<script>
+        \\const source = new EventSource("/.watch");
+        \\window.onbeforeunload = () => source.close();
+        \\source.onerror = async () => {
+        \\  source.close();
+        \\  let maxRetries = 1000;
+        \\  let okays = 0;
+        \\  while (maxRetries-- > 0) {
+        \\    try {
+        \\      if ((await fetch("/")).status === 200) {
+        \\        okays++;
+        \\        if (okays > 10) {
+        \\          location.reload();
+        \\          break;
+        \\        }
+        \\      }
+        \\    } catch (e) { okays = 0; }
+        \\  }
+        \\}
+        \\</script>
+    ;
+
+    const route_path = "/.watch";
+
+    pub fn serveWatchStream(_: *httpz.Request, res: *httpz.Response) !void {
+        try res.startEventStream({}, struct {
+            fn _(_: void, stream: std.net.Stream) void {
+                while (true) {
+                    stream.writeAll("event: ping\ndata:\n\n") catch return;
+                    std.Thread.sleep(1e6 * 1000);
+                }
+            }
+        }._);
+    }
+
+    pub fn injectReloadScript(res: *httpz.Response) !void {
+        return res.writer().writeAll(reload_script);
     }
 };
 
@@ -91,140 +230,15 @@ pub fn startServer() !void {
         server.deinit();
     }
 
-    var router = try server.router(.{});
-
-    router.get("/", Controllers.index, .{});
-    router.get("/item", Controllers.item, .{});
-    router.get("/item/discussion", Controllers.discussion, .{});
-    router.get("/assets/*", Controllers.assets, .{});
-
     std.debug.print("server running at localhost:{d}\n", .{port});
     try server.listen();
 
     unreachable;
 }
 
-const Controllers = struct {
-    fn assets(ctx: *RequestContext) !void {
-        const path = ctx.req.url.path;
-        const filename = path[0..@min(path.len, Assets.max_name_len)];
-
-        const t: Assets.Names = std.meta.stringToEnum(Assets.Names, filename) orelse {
-            ctx.res.status = 404;
-            return error.AssetNotFound;
-        };
-
-        const data = Assets.getData(t);
-        const file_ext = std.fs.path.extension(filename);
-
-        if (Ext2mime.get(file_ext)) |mime_type| {
-            ctx.res.header("Content-Type", mime_type);
-        }
-
-        ctx.res.body = data;
-    }
-
-    fn index(ctx: *RequestContext) !void {
-        const query = try ctx.req.query();
-        const page_num = if (query.get("page")) |p| std.fmt.parseInt(u8, p, 10) catch 0 else 0;
-        const allocator = ctx.allocator;
-
-        const page_size: usize = 20;
-        const i = page_num * page_size;
-
-        const ids = try ctx.hn.fetchTopStoryIDs(allocator, page_size, i);
-        defer allocator.free(ids);
-
-        var wg: std.Thread.WaitGroup = .{};
-        const items = try ctx.hn.fetchAllItems(allocator, ids, .{
-            .write_cache = true,
-            .write_cache_wg = &wg,
-        });
-        defer {
-            wg.wait();
-            HN.freeItems(allocator, items);
-        }
-        std.sort.block(
-            HN.Item,
-            @constCast(items),
-            {},
-            struct {
-                fn _(_: void, a: HN.Item, b: HN.Item) bool {
-                    return a.time > b.time;
-                }
-            }._,
-        );
-
-        ctx.res.header("Content-Type", "text/html");
-        try @import("./pages/index.zig").render(ctx, .{
-            .items = items,
-            .page_num = page_num,
-            .page_size = page_size,
-        });
-    }
-
-    fn item(ctx: *RequestContext) !void {
-        const allocator = ctx.allocator;
-        const query = try ctx.req.query();
-        const id = if (query.get("id")) |p| std.fmt.parseInt(HN.ItemID, p, 10) catch {
-            return error.InvalidID;
-        } else {
-            return error.@"Need an ID";
-        };
-        const with_links_only = query.get("links") != null;
-
-        var wg: std.Thread.WaitGroup = .{};
-        const items = try ctx.hn.fetchThread(allocator, id, .{ .wg = &wg });
-        defer {
-            wg.wait();
-            HN.freeItems(allocator, items);
-        }
-
-        var lookup: std.AutoHashMapUnmanaged(HN.ItemID, HN.Item) = .{};
-        defer lookup.deinit(allocator);
-        try HN.fillItems(allocator, @constCast(items), &lookup);
-
-        ctx.res.header("Content-Type", "text/html");
-        try @import("./pages/item.zig").render(ctx, .{
-            .items = items,
-            .item_lookup = &lookup,
-            .with_links_only = with_links_only,
-        });
-    }
-
-    fn discussion(ctx: *RequestContext) !void {
-        const allocator = ctx.allocator;
-        const query = try ctx.req.query();
-        const thread_id = if (query.get("tid")) |p| std.fmt.parseInt(HN.ItemID, p, 10) catch {
-            return error.InvalidID;
-        } else {
-            return error.@"Need an tid (thread id)";
-        };
-        const item_id = if (query.get("id")) |p| std.fmt.parseInt(HN.ItemID, p, 10) catch {
-            return error.InvalidID;
-        } else {
-            return error.@"Need an id (item id)";
-        };
-
-        const items = try ctx.hn.fetchDiscussion(allocator, thread_id, item_id);
-        defer HN.freeItems(allocator, items);
-
-        var lookup: std.AutoHashMapUnmanaged(HN.ItemID, HN.Item) = .{};
-        defer lookup.deinit(allocator);
-        try HN.fillItems(allocator, @constCast(items), &lookup);
-
-        ctx.res.header("Content-Type", "text/html");
-        try @import("./pages/item.zig").render(ctx, .{
-            .items = items,
-            .item_lookup = &lookup,
-            .discussion_mode = true,
-        });
-    }
-};
-
 const test_output = @import("build_options").test_output;
 
-test "routes:index" {
+test "routes:ndex" {
     const allocator = std.testing.allocator;
 
     var wt = httpz.testing.init(.{});
@@ -244,7 +258,7 @@ test "routes:index" {
         .allocator = allocator,
         .thread_pool = null,
     };
-    try Controllers.index(&ctx);
+    try @import("./pages/index.zig").serve(&ctx);
     try wt.expectStatus(200);
     if (test_output)
         std.debug.print("test output for \"{s}\":\n{s}\n\n", .{ "/", try wt.getBody() });
@@ -272,7 +286,7 @@ test "routes:item" {
 
     const q = try wt.req.query();
     q.add("id", "1727731");
-    try Controllers.item(&ctx);
+    try routes.@"/item"(&ctx);
     try wt.expectStatus(200);
     if (test_output)
         std.debug.print("test output for \"{s}\":\n{s}\n\n", .{ "/item", try wt.getBody() });
@@ -298,13 +312,13 @@ test "routes:assets" {
         .thread_pool = null,
     };
 
-    ctx.req.url = .parse("/assets/script.js");
+    ctx.req.url = .parse("/assets/style.css");
 
-    try Controllers.assets(&ctx);
+    try Handler.handleAsset(ctx.req, ctx.res);
     try wt.expectStatus(200);
     if (test_output)
         std.debug.print("test output for \"{s}\":\n{s}\n\n", .{
-            "/assets/script.js",
+            "/assets/style.css",
             try wt.getBody(),
         });
 }

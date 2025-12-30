@@ -42,6 +42,64 @@ const depth_symbols: []const []const u8 = &.{
     "⟤", "⟥", "⯀", "⯐", "■",
 };
 
+pub fn serveItem(ctx: *RequestContext) !void {
+    const allocator = ctx.allocator;
+    const query = try ctx.req.query();
+    const id = if (query.get("id")) |p| std.fmt.parseInt(HN.ItemID, p, 10) catch {
+        return error.InvalidID;
+    } else {
+        return error.@"Need an ID";
+    };
+    const with_links_only = query.get("links") != null;
+
+    var wg: std.Thread.WaitGroup = .{};
+    const items = try ctx.hn.fetchThread(allocator, id, .{ .wg = &wg });
+    defer {
+        wg.wait();
+        HN.freeItems(allocator, items);
+    }
+
+    var lookup: std.AutoHashMapUnmanaged(HN.ItemID, HN.Item) = .{};
+    defer lookup.deinit(allocator);
+    try HN.fillItems(allocator, @constCast(items), &lookup);
+
+    ctx.res.header("Content-Type", "text/html");
+    try render(ctx, .{
+        .items = items,
+        .item_lookup = &lookup,
+        .with_links_only = with_links_only,
+    });
+}
+
+pub fn serveDiscussion(ctx: *RequestContext) !void {
+    const allocator = ctx.allocator;
+    const query = try ctx.req.query();
+    const thread_id = if (query.get("tid")) |p| std.fmt.parseInt(HN.ItemID, p, 10) catch {
+        return error.InvalidID;
+    } else {
+        return error.@"Need an tid (thread id)";
+    };
+    const item_id = if (query.get("id")) |p| std.fmt.parseInt(HN.ItemID, p, 10) catch {
+        return error.InvalidID;
+    } else {
+        return error.@"Need an id (item id)";
+    };
+
+    const items = try ctx.hn.fetchDiscussion(allocator, thread_id, item_id);
+    defer HN.freeItems(allocator, items);
+
+    var lookup: std.AutoHashMapUnmanaged(HN.ItemID, HN.Item) = .{};
+    defer lookup.deinit(allocator);
+    try HN.fillItems(allocator, @constCast(items), &lookup);
+
+    ctx.res.header("Content-Type", "text/html");
+    try render(ctx, .{
+        .items = items,
+        .item_lookup = &lookup,
+        .discussion_mode = true,
+    });
+}
+
 pub fn render(ctx: *RequestContext, data: Data) !void {
     const z = ctx.zhtml;
     const layout: Layout = .{ .ctx = ctx };

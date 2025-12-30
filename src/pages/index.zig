@@ -10,6 +10,45 @@ pub const Data = struct {
     page_size: usize,
 };
 
+pub fn serve(ctx: *RequestContext) !void {
+    const query = try ctx.req.query();
+    const page_num = if (query.get("page")) |p| std.fmt.parseInt(u8, p, 10) catch 0 else 0;
+    const allocator = ctx.allocator;
+
+    const page_size: usize = 20;
+    const i = page_num * page_size;
+
+    const ids = try ctx.hn.fetchTopStoryIDs(allocator, page_size, i);
+    defer allocator.free(ids);
+
+    var wg: std.Thread.WaitGroup = .{};
+    const items = try ctx.hn.fetchAllItems(allocator, ids, .{
+        .write_cache = true,
+        .write_cache_wg = &wg,
+    });
+    defer {
+        wg.wait();
+        HN.freeItems(allocator, items);
+    }
+    std.sort.block(
+        HN.Item,
+        @constCast(items),
+        {},
+        struct {
+            fn _(_: void, a: HN.Item, b: HN.Item) bool {
+                return a.time > b.time;
+            }
+        }._,
+    );
+
+    ctx.res.header("Content-Type", "text/html");
+    try render(ctx, .{
+        .items = items,
+        .page_num = page_num,
+        .page_size = page_size,
+    });
+}
+
 pub fn render(ctx: *RequestContext, data: Data) !void {
     const z = ctx.zhtml;
     const layout: Layout = .{ .ctx = ctx };
@@ -41,6 +80,3 @@ pub fn render(ctx: *RequestContext, data: Data) !void {
     }
     layout.end();
 }
-
-// TODO: add [source] links
-// TODO: add [comment chain] /discussion?id=1231231
