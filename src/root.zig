@@ -8,6 +8,7 @@ const Zhtml = @import("zhtml");
 const RequestContext = @import("./context.zig");
 
 const Action = *const fn (*RequestContext) anyerror!void;
+const Render = *const fn (*Zhtml) anyerror!void;
 
 const routes = .{
     .@"/" = @import("./pages/index.zig").serve,
@@ -156,6 +157,21 @@ const Handler = struct {
     }
 };
 
+fn renderToString(allocator: std.mem.Allocator, render: Render) ![]const u8 {
+    var buf: std.Io.Writer.Allocating = .init(allocator);
+    defer buf.deinit();
+
+    var zhtml: Zhtml = try .init(&buf.writer, allocator);
+    defer {
+        if (zhtml.getErrorTrace()) |trace| std.debug.print("{s}\n", .{trace});
+        zhtml.deinit(allocator);
+    }
+
+    try render(&zhtml);
+
+    return buf.toOwnedSlice();
+}
+
 const PageReloader = struct {
     const reload_script =
         \\
@@ -213,6 +229,12 @@ pub fn startServer() !void {
     });
     defer tpool.deinit();
 
+    const page404 = try renderToString(allocator, @import("pages/error404.zig").render);
+    defer allocator.free(page404);
+
+    const page500 = try renderToString(allocator, @import("pages/error500.zig").render);
+    defer allocator.free(page500);
+
     const port = 8000;
     var server = try httpz.Server(Handler).init(allocator, .{
         .address = "0.0.0.0",
@@ -224,6 +246,8 @@ pub fn startServer() !void {
         .thread_pool = &tpool,
         .allocator = allocator,
         .hn = &hn,
+        .page404 = page404,
+        .page500 = page500,
     });
     defer {
         server.stop();

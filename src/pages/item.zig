@@ -102,7 +102,7 @@ pub fn serveDiscussion(ctx: *RequestContext) !void {
 
 pub fn render(ctx: *RequestContext, data: Data) !void {
     const z = ctx.zhtml;
-    const layout: Layout = .{ .ctx = ctx };
+    const layout: Layout = .{ .zhtml = z };
     const arena = ctx.res.arena;
     const items = data.items;
     const lookup = data.item_lookup;

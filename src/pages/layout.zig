@@ -3,14 +3,14 @@ const Zhtml = @import("zhtml");
 const RequestContext = @import("../context.zig");
 const Assets = @import("../assets.zig");
 
-ctx: *RequestContext,
+zhtml: *Zhtml,
 
 pub const Attrs = struct {
     title: ?[]const u8 = null,
 };
 
 pub fn begin(self: @This(), attrs: Attrs) !void {
-    const z = self.ctx.zhtml;
+    const z = self.zhtml;
 
     z.@"writeUnsafe!?"("<!DOCTYPE html>");
     z.html.@"<>"();
@@ -49,7 +49,7 @@ pub fn begin(self: @This(), attrs: Attrs) !void {
 }
 
 pub fn end(self: @This()) void {
-    const z = self.ctx.zhtml;
+    const z = self.zhtml;
     z.body.@"</>"();
     z.html.@"</>"();
 }

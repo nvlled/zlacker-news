@@ -51,7 +51,7 @@ pub fn serve(ctx: *RequestContext) !void {
 
 pub fn render(ctx: *RequestContext, data: Data) !void {
     const z = ctx.zhtml;
-    const layout: Layout = .{ .ctx = ctx };
+    const layout: Layout = .{ .zhtml = z };
 
     try layout.begin(.{});
     {
