@@ -40,7 +40,7 @@ function initItemLinks(item) {
             }
         }
 
-        link.onmouseover = () => {
+        link.onpointerover = () => {
             if (popover) {
                 return;
             }
@@ -52,18 +52,19 @@ function initItemLinks(item) {
             const target = document.getElementById(id);
             if (!target) return;
 
-            link.style.anchorName = `--${item.id}-${id}`;
-
-            link.title = "Click and hold to pin"; // remove native popover title
-
             popover = target.cloneNode(true);
             popover.classList.add("popover");
-            popover.style.position = "absolute";
-            popover.style.positionAnchor = link.style.anchorName;
-            popover.style.positionArea = end.offsetLeft > window.innerWidth/2
-                ? "top span-left"
-                : "top span-right";
+            {
+                const r = link.getBoundingClientRect();
+                popover.style.position = "absolute";
+                popover.style.top = Math.floor(r.bottom + scrollY) +"px";
+                if (r.right < window.innerWidth/2)
+                    popover.style.left =  Math.floor(r.left) + "px";
+                else
+                    popover.style.right =  Math.ceil(innerWidth - r.right) + "px";
+            }
 
+            link.title = "Click and hold to pin"; // remove native popover title
             popover.querySelector(".reply-links")?.remove();
 
             document.body.appendChild(popover);
@@ -79,20 +80,30 @@ function initItemLinks(item) {
     }
 }
 
-const observer = new MutationObserver(e => {
-    for (const record of e) {
-        for (const node of record.addedNodes || []) {
-            if (node.nodeType != Node.ELEMENT_NODE) continue;
-            if (node.tagName == "FOOTER")  {
-                observer.disconnect();
-                break;
-            }
-            if (!node.classList.contains("item")) continue;
-            initItemLinks(node);
-        }
-    }
-});
+// https://stackoverflow.com/a/4819886
+function isTouchDevice() {
+  return (('ontouchstart' in window) ||
+     (navigator.maxTouchPoints > 0) ||
+     (navigator.msMaxTouchPoints > 0));
+}
 
-observer.observe(document.querySelector("body"), {
-    childList: true,
-})
+
+if (!isTouchDevice()) {
+    const observer = new MutationObserver(e => {
+        for (const record of e) {
+            for (const node of record.addedNodes || []) {
+                if (node.nodeType != Node.ELEMENT_NODE) continue;
+                if (node.tagName == "FOOTER")  {
+                    observer.disconnect();
+                    break;
+                }
+                if (!node.classList.contains("item")) continue;
+                initItemLinks(node);
+            }
+        }
+    });
+
+    observer.observe(document.querySelector("body"), {
+        childList: true,
+    })
+}
