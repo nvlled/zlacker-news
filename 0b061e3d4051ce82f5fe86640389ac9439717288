@@ -1,1 +1,1 @@
-This bug actually made the program get stuck in an infinite loop, causing it to utilize CPU at 100%, for two hours!!!. This was some dangerous stuffs, good thing I wasnt billed by CPU usage.
+This bug actually made the program get stuck in an infinite loop, causing it to utilize CPU at 100%, for two hours!!!. That was some dangerous stuff, good thing I wasnt billed by CPU usage. I wonder if this is a problem with zqlite though, I remember seeing a mutex inside a loop
