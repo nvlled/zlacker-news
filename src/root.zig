@@ -235,6 +235,19 @@ pub fn startServer() !void {
     const page500 = try renderToString(allocator, @import("pages/error500.zig").render);
     defer allocator.free(page500);
 
+    {
+        const exe_path = try std.fs.selfExeDirPathAlloc(allocator);
+        defer allocator.free(exe_path);
+
+        inline for (.{ .{ "404.html", page404 }, .{ "500.html", page500 } }) |item| {
+            const filename, const contents = item;
+            const dest_path = try std.fs.path.join(allocator, &.{ exe_path, filename });
+            var file = try std.fs.cwd().createFile(dest_path, .{});
+            defer file.close();
+            try file.writeAll(contents);
+        }
+    }
+
     const port = 8000;
     var server = try httpz.Server(Handler).init(allocator, .{
         .address = "0.0.0.0",
