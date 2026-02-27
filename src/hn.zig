@@ -383,7 +383,7 @@ pub fn init(allocator: Allocator) !Self {
         allocator.destroy(tpool);
     }
 
-    const db: DB = try .init(allocator, n_jobs);
+    const db: DB = try .init(allocator);
     errdefer db.deinit();
 
     try db.createDatabase();
@@ -913,39 +913,55 @@ fn dupeItems(allocator: Allocator, items: []const Item) ![]const Item {
 }
 
 const DB = struct {
-    pool: *zqlite.Pool,
+    read_pool: *zqlite.Pool,
+    write_pool: *zqlite.Pool,
 
     const expiration_sec: i128 = if (builtin.mode == .Debug) 8 * 60 * 60 else 15 * 60;
     const items_limit: usize = 1e4 * 50;
     const db_filename = "zlacker.db";
 
-    pub fn init(allocator: Allocator, pool_size: usize) !@This() {
-        const pool: *zqlite.Pool = try .init(allocator, .{
+    const pragmas =
+        \\PRAGMA journal_mode = WAL;
+        \\PRAGMA busy_timeout = 5000;
+        \\PRAGMA synchronous = NORMAL;
+        \\PRAGMA cache_size = 1000000000;
+        \\PRAGMA foreign_keys = true;
+        \\PRAGMA temp_store = memory;
+    ;
+
+    pub fn init(allocator: Allocator) !@This() {
+        const read_pool: *zqlite.Pool = try .init(allocator, .{
             .path = db_filename,
-            .size = pool_size,
+            .size = std.Thread.getCpuCount() catch 4,
+        });
+        const write_pool: *zqlite.Pool = try .init(allocator, .{
+            .path = db_filename,
+            .size = 1,
         });
 
-        for (pool.conns) |conn| {
-            try conn.execNoArgs(
-                \\PRAGMA journal_mode=WAL;
-                \\PRAGMA foreign_keys = ON;
-            );
-        }
+        for (read_pool.conns) |conn| try conn.execNoArgs(pragmas);
+        for (write_pool.conns) |conn| try conn.execNoArgs(pragmas);
 
         return .{
-            .pool = pool,
+            .read_pool = read_pool,
+            .write_pool = write_pool,
         };
     }
 
     pub fn deinit(self: @This()) void {
-        self.pool.deinit();
+        self.read_pool.deinit();
+        self.write_pool.deinit();
+    }
+
+    pub fn transaction(conn: zqlite.Conn) !void {
+        return conn.execNoArgs("begin immediate");
     }
 
     pub fn insertFeed(self: @This(), feed: Feed, ids: []const ItemID) !void {
-        const conn = self.pool.acquire();
+        const conn = self.write_pool.acquire();
         defer conn.release();
 
-        try conn.transaction();
+        try transaction(conn);
         defer conn.commit() catch {
             std.log.err("failed to commit insertFeed: {s}", .{conn.lastError()});
         };
@@ -973,7 +989,7 @@ const DB = struct {
         limit: usize,
         offset: usize,
     ) !?[]const ItemID {
-        const conn = self.pool.acquire();
+        const conn = self.read_pool.acquire();
         defer conn.release();
 
         errdefer std.log.err("failed to read feed: {s}", .{conn.lastError()});
@@ -1022,7 +1038,7 @@ const DB = struct {
 
         errdefer abort = true;
 
-        const conn = self.pool.acquire();
+        const conn = self.read_pool.acquire();
         defer conn.release();
 
         errdefer std.log.err("failed to read item: {s}", .{conn.lastError()});
@@ -1158,7 +1174,7 @@ const DB = struct {
             result.deinit(allocator);
         }
 
-        const conn = self.pool.acquire();
+        const conn = self.read_pool.acquire();
         defer conn.release();
 
         errdefer std.log.err("failed to read item: {s}", .{conn.lastError()});
@@ -1236,7 +1252,7 @@ const DB = struct {
             result.deinit(allocator);
         }
 
-        const conn = self.pool.acquire();
+        const conn = self.read_pool.acquire();
         defer conn.release();
 
         errdefer std.log.err("failed to read item: {s}", .{conn.lastError()});
@@ -1310,9 +1326,8 @@ const DB = struct {
         allocator: Allocator,
         id: ItemID,
     ) !?Item {
-        const conn = self.pool.acquire();
+        const conn = self.read_pool.acquire();
         defer conn.release();
-        try conn.busyTimeout(1000);
 
         errdefer std.log.err("failed to read item: {s}", .{conn.lastError()});
 
@@ -1381,11 +1396,10 @@ const DB = struct {
     }
 
     pub fn insertItems(self: @This(), items: []Item) !void {
-        const conn = self.pool.acquire();
+        const conn = self.write_pool.acquire();
         defer conn.release();
-        try conn.busyTimeout(1000 * 10);
 
-        try conn.transaction();
+        try transaction(conn);
         defer conn.commit() catch unreachable;
         errdefer conn.rollback();
 
@@ -1459,7 +1473,7 @@ const DB = struct {
     }
 
     pub fn createDatabase(self: @This()) !void {
-        const conn = self.pool.acquire();
+        const conn = self.write_pool.acquire();
         defer conn.release();
         errdefer {
             std.log.err("failed to create database: {s}", .{conn.lastError()});
@@ -1473,7 +1487,7 @@ const DB = struct {
             \\  inserted INTEGER,
             \\
             \\  UNIQUE (feed, num) ON CONFLICT REPLACE
-            \\);
+            \\) STRICT;
             \\
             \\CREATE TABLE IF NOT EXISTS hn_item_replies(
             \\  item_id INTEGER,
@@ -1482,21 +1496,21 @@ const DB = struct {
             \\  FOREIGN KEY (item_id) references hn_items(id)
             \\    ON DELETE CASCADE,
             \\  UNIQUE (item_id, reply_id) ON CONFLICT IGNORE
-            \\);
+            \\) STRICT;
             \\
             \\CREATE INDEX IF NOT EXISTS idx_item_replies_id ON hn_item_replies(item_id);
             \\
             \\CREATE TABLE IF NOT EXISTS hn_items(
             \\  id INTEGER PRIMARY KEY,
-            \\  username VARCHAR(16),
+            \\  username TEXT,
             \\  score INTEGER,
-            \\  title VARCHAR(100),
+            \\  title TEXT,
             \\  url TEXT,
             \\  descendants INTEGER,
             \\  time INTEGER,
             \\  text TEXT,
-            \\  deleted TINYINT,
-            \\  dead TINYINT,
+            \\  deleted INT,
+            \\  dead INT,
             \\  parent_id INTEGER,
             \\  thread_id INTEGER,
             \\  depth INTEGER,
@@ -1504,7 +1518,7 @@ const DB = struct {
             \\
             \\  FOREIGN KEY (parent_id) references hn_items(id)
             \\     ON DELETE CASCADE
-            \\);
+            \\) STRICT;
             \\
             \\CREATE INDEX IF NOT EXISTS idx_items_parent_id ON hn_items(parent_id);
             \\CREATE INDEX IF NOT EXISTS idx_items_thread_id ON hn_items(thread_id);
@@ -1536,7 +1550,7 @@ const DB = struct {
     }
 
     pub fn removePastLimit(self: @This()) !void {
-        const conn = self.pool.acquire();
+        const conn = self.read_pool.acquire();
         defer conn.release();
         errdefer std.log.err("{s}", .{conn.lastError()});
 
