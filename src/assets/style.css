@@ -34,6 +34,10 @@ a.replink {
 	margin-bottom: 7px;
 	&.op { margin-bottom: 10px };
 
+    &:target {
+        border-left: 5px solid #007744
+    }
+
 
 	background: #003333;
 	&:nth-child(odd) { background: #002a29; }
@@ -55,6 +59,8 @@ a.replink {
 	.header {
 		margin-top: 2px;
 		margin-bottom: 2px;
+        display: flex;
+        justify-content: space-between;
 	}
 
 	.body {
@@ -78,6 +84,16 @@ a.replink {
 		display: inline-block;
 		color: #007744;
 	}
+
+    &.popover.pinned {
+        border: 1px solid #0cc;
+    }
+    &.popover {
+        border: 1px solid green;
+        max-width: 700px;
+        max-height: 200px;
+        overflow-y: scroll;
+    }
 }
 
 

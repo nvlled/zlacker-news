@@ -123,6 +123,9 @@ pub fn render(ctx: *RequestContext, data: Data) !void {
 
     try layout.begin(.{ .title = op.title });
 
+    z.script.attr(.src, Assets.link(.@"/assets/item-preview.js"));
+    z.script.render("");
+
     try z.div.attrf(.id, "{d}", .{op.id});
     z.div.attr(.class, "op item");
     z.div.@"<>"();
@@ -299,8 +302,6 @@ pub fn render(ctx: *RequestContext, data: Data) !void {
             }
             z.div.@"</>"();
 
-            z.attr(.class, "body");
-            z.div.@"<>"();
             if (item.parent) |p| {
                 if (lookup.get(p)) |parent| {
                     if (p == op.id) replyLink.attr(.class, "op");
@@ -308,6 +309,9 @@ pub fn render(ctx: *RequestContext, data: Data) !void {
                     z.br.@"<>"();
                 }
             }
+
+            z.attr(.class, "body");
+            z.div.@"<>"();
 
             {
                 var link_search = try hn_link.searchAll(ctx.allocator, item.text, .{});
@@ -396,7 +400,7 @@ const ReplyLink = struct {
             .class = try sprintf(arena, "replink {s}", .{
                 self.class,
             }),
-            .title = title[0..@min(300, title.len)],
+            .title = title[0..@min(150, title.len)],
         });
 
         z.a.@"<>"();
