@@ -1550,7 +1550,7 @@ const DB = struct {
     }
 
     pub fn removePastLimit(self: @This()) !void {
-        const conn = self.read_pool.acquire();
+        const conn = self.write_pool.acquire();
         defer conn.release();
         errdefer std.log.err("{s}", .{conn.lastError()});
 
