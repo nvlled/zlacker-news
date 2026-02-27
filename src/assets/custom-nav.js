@@ -7,6 +7,10 @@ window.onload = () => {
      <div id="custom-nav">
       <button class="back">go back</button>
       <span class="spacer"> </span>
+      <a href="#top">top</a>
+      <span class="spacer"> </span>
+      <a href="#bottom">bottom</a>
+      <span class="spacer"> </span>
       <button class="forward">go forth</button>
     </div>
     `;

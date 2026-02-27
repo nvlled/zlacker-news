@@ -89,7 +89,7 @@ a.replink {
 	margin-inline: auto;
 	width: fit-content;
 
-	button {
+	a, button {
 		background: #003333;
 		color: white;
 	}
