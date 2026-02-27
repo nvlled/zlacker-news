@@ -42,14 +42,20 @@ pub fn begin(self: @This(), attrs: Attrs) !void {
     z.body.@"<>"();
 
     z.h1.@"<>"();
+
     z.a.attr(.href, "/");
     z.a.attr(.id, "top");
     z.a.render("zlacker");
+
+
     z.h1.@"</>"();
 }
 
 pub fn end(self: @This()) void {
     const z = self.zhtml;
+
+    z.footer.render("");
+
     z.body.@"</>"();
     z.html.@"</>"();
 }
