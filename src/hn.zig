@@ -925,8 +925,13 @@ const DB = struct {
         \\PRAGMA busy_timeout = 5000;
         \\PRAGMA synchronous = NORMAL;
         \\PRAGMA cache_size = 1000000000;
-        \\PRAGMA foreign_keys = true;
         \\PRAGMA temp_store = memory;
+
+        // HN posts can come and go, or they tend to
+        // get moved around by dang, so I really
+        // can't enforce this constraint that I don't
+        // have control over.
+        //\\PRAGMA foreign_keys = true;
     ;
 
     pub fn init(allocator: Allocator) !@This() {
