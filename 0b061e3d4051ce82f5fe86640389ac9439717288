@@ -4,4 +4,21 @@ dangerous stuff, good thing I wasnt billed by CPU usage. I wonder if
 this is a problem with zqlite though, I remember seeing a mutex inside a
 loop.
 
-test
+Edit: Actually no, the reason is more stupid. On the deploy
+script, I accidentally uncommented a line, so it resulted
+as such:
+
+  zig build --release=safe
+  zig build
+
+Which means it is essentially building it twice,
+but the created binary is a debug build. A debug
+build would normally be fine even for a production site,
+just slower. But on debug builds, I enabled auto page
+reloads, where the server periodically pings the client
+with server-sent events. I usually open a bunch
+of tabs for thread I wanted to read, so this
+created a DOS'ing effect on my own site.
+
+I think that's what happened, at least
+based on the nginx logs.
