@@ -94,8 +94,26 @@ a.replink {
         max-height: 200px;
         overflow-y: scroll;
     }
+    
 }
 
+#top-bottom-nav {
+    position: fixed;
+    right: 0;
+    bottom: 0;
+    text-align: right;
+    font-family: monospace;
+	a {
+        text-decoration: none;
+		background: #003333;
+		color: white;
+	}
+}
+
+header.site {
+    display: flex;
+    justify-content: space-between;
+}
 
 #custom-nav {
 	position: fixed;
@@ -106,8 +124,9 @@ a.replink {
 	width: fit-content;
 
 	a, button {
-		background: #003333;
-		color: white;
+        background: #003333;
+        color: white;
+        font-size: 12px;
 	}
 
 	.spacer {

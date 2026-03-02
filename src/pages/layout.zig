@@ -54,6 +54,7 @@ pub fn begin(self: @This(), attrs: Attrs) !void {
 pub fn end(self: @This()) void {
     const z = self.zhtml;
 
+    z.footer.attr(.id, "bottom");
     z.footer.render("");
 
     z.body.@"</>"();
