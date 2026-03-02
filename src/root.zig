@@ -10,6 +10,8 @@ const RequestContext = @import("./context.zig");
 const Action = *const fn (*RequestContext) anyerror!void;
 const Render = *const fn (*Zhtml) anyerror!void;
 
+const log = std.log.scoped(.http);
+
 const routes = .{
     .@"/" = @import("./pages/index.zig").serve,
     .@"/item" = @import("./pages/item.zig").serveItem,
@@ -164,7 +166,7 @@ fn renderToString(allocator: std.mem.Allocator, render: Render) ![]const u8 {
 
     var zhtml: Zhtml = try .init(&buf.writer, allocator);
     defer {
-        if (zhtml.getErrorTrace()) |trace| std.debug.print("{s}\n", .{trace});
+        if (zhtml.getErrorTrace()) |trace| log.err("{s}\n", .{trace});
         zhtml.deinit(allocator);
     }
 
@@ -271,7 +273,7 @@ pub fn startServer() !void {
         server.deinit();
     }
 
-    std.debug.print("server running at localhost:{d}\n", .{port});
+    log.info("server running at localhost:{d}\n", .{port});
     try server.listen();
 
     unreachable;
@@ -302,7 +304,7 @@ test "routes:ndex" {
     try @import("./pages/index.zig").serve(&ctx);
     try wt.expectStatus(200);
     if (test_output)
-        std.debug.print("test output for \"{s}\":\n{s}\n\n", .{ "/", try wt.getBody() });
+        std.info("test output for \"{s}\":\n{s}\n\n", .{ "/", try wt.getBody() });
 }
 
 test "routes:item" {
@@ -330,7 +332,7 @@ test "routes:item" {
     try routes.@"/item"(&ctx);
     try wt.expectStatus(200);
     if (test_output)
-        std.debug.print("test output for \"{s}\":\n{s}\n\n", .{ "/item", try wt.getBody() });
+        std.info("test output for \"{s}\":\n{s}\n\n", .{ "/item", try wt.getBody() });
 }
 
 test "routes:assets" {
@@ -358,7 +360,7 @@ test "routes:assets" {
     try Handler.handleAsset(ctx.req, ctx.res);
     try wt.expectStatus(200);
     if (test_output)
-        std.debug.print("test output for \"{s}\":\n{s}\n\n", .{
+        std.info("test output for \"{s}\":\n{s}\n\n", .{
             "/assets/style.css",
             try wt.getBody(),
         });

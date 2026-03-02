@@ -5,6 +5,7 @@ const zqlite = @import("zqlite");
 const Allocator = std.mem.Allocator;
 const getBindString = @import("./query_param.zig").getBindString;
 const curl = @import("curl");
+const log = std.log.scoped(.hn);
 
 client: http.Client,
 thread_pool: *std.Thread.Pool,
@@ -157,7 +158,7 @@ const Fetcher = struct {
                 var limit: usize = 32;
                 while (self.queue.pop()) |item| {
                     self.multi.addHandle(item.easy) catch |err| {
-                        std.log.err("failed to add handle: {any}", .{err});
+                        log.err("failed to add handle: {any}", .{err});
                         _ = self.result.remove(item.easy.handle);
                         continue;
                     };
@@ -169,7 +170,7 @@ const Fetcher = struct {
 
             const count = blk: {
                 const c = self.multi.perform() catch |err| {
-                    std.log.err("curl: failed to perform : {any}", .{err});
+                    log.err("curl: failed to perform : {any}", .{err});
                     continue;
                 };
                 break :blk c;
@@ -203,7 +204,7 @@ const Fetcher = struct {
                     &status_code,
                 ),
             ) catch |err| {
-                std.log.err("curl: huh: {any}", .{err});
+                log.err("curl: huh: {any}", .{err});
             };
 
             {
@@ -211,14 +212,14 @@ const Fetcher = struct {
                 defer self.queue_mu.unlock();
 
                 self.multi.removeHandle(easy_handle) catch |err| {
-                    std.log.err("curl: failed to remove handle: {any}", .{err});
+                    log.err("curl: failed to remove handle: {any}", .{err});
                 };
             }
 
             if (self.result.get(easy_handle)) |item| {
                 item.wg.finish();
                 _ = curl.checkCode(info.msg.data.result) catch |err| {
-                    std.debug.print("request failed: {any}\n", .{err});
+                    log.err("request failed: {any}\n", .{err});
                     item.failed = true;
                 };
                 _ = self.result.remove(easy_handle);
@@ -419,8 +420,8 @@ pub fn waitBackgroundTasks(self: *Self) void {
 
 // Caller must free returned string
 pub fn fetch(self: *Self, allocator: Allocator, url: [:0]const u8) ![]const u8 {
-    std.log.debug("fetching url {s}", .{url});
-    defer std.log.debug("fetched url {s}", .{url});
+    log.debug("fetching url {s}", .{url});
+    defer log.info("fetched url {s}", .{url});
 
     var job = try self.fetcher.submit(allocator, .{
         .method = .GET,
@@ -442,8 +443,8 @@ pub fn fetchAsync(
         wg: ?*std.Thread.WaitGroup = null,
     },
 ) !Fetcher.Job {
-    std.log.debug("fetching url {s}", .{url});
-    defer std.log.debug("fetched url {s}", .{url});
+    log.debug("fetching url {s}", .{url});
+    defer log.info("fetched url {s}", .{url});
 
     const job = try self.fetcher.submit(allocator, .{
         .method = .GET,
@@ -582,7 +583,7 @@ pub fn fetchAllItems(
     for (jobs, 0..) |*job, i| {
         items[i] = job.await(allocator) catch |err| {
             switch (err) {
-                Error.FetchError => std.log.err("failed to fetch item: {d}", .{ids[i]}),
+                Error.FetchError => log.err("failed to fetch item: {d}", .{ids[i]}),
                 else => {},
             }
             return err;
@@ -594,7 +595,7 @@ pub fn fetchAllItems(
             self.thread_pool.spawnWg(w, struct {
                 fn _(hn: *Self, data: []Item) void {
                     hn.db.insertItems(data) catch |err| {
-                        std.log.err("failed to cache items: {any}", .{err});
+                        log.err("failed to cache items: {any}", .{err});
                     };
                 }
             }._, .{ self, items });
@@ -625,8 +626,8 @@ const AlgoliaItem = struct {
 /// Uses the official Algolia API. This should be preferred since it only
 /// makes one HTTP request.
 pub fn fetchThreadAlgolia(self: *Self, allocator: Allocator, opID: ItemID) ![]Item {
-    std.log.debug("fetching thread {d} from algolia", .{opID});
-    errdefer std.log.debug("failed to fetch thread {d} from algolia", .{opID});
+    log.debug("fetching thread {d} from algolia", .{opID});
+    errdefer log.info("failed to fetch thread {d} from algolia", .{opID});
 
     const url = try std.fmt.allocPrintSentinel(
         allocator,
@@ -639,12 +640,12 @@ pub fn fetchThreadAlgolia(self: *Self, allocator: Allocator, opID: ItemID) ![]It
     const json_str = try self.fetch(allocator, url);
     defer allocator.free(json_str);
 
-    std.log.debug("parsing thread {d} response from algolia", .{opID});
+    log.debug("parsing thread {d} response from algolia", .{opID});
     const parsed = try std.json.parseFromSlice(AlgoliaItem, allocator, json_str, .{
         .ignore_unknown_fields = true,
     });
     defer parsed.deinit();
-    std.log.debug("parsed thread {d} response from algolia:\n{s}...\n", .{ opID, json_str[0..32] });
+    log.debug("parsed thread {d} response from algolia:\n{s}...\n", .{ opID, json_str[0..32] });
 
     const countItems = struct {
         fn loop(aitem: *const AlgoliaItem) usize {
@@ -707,17 +708,14 @@ pub fn fetchThreadAlgolia(self: *Self, allocator: Allocator, opID: ItemID) ![]It
     errdefer for (result.items) |item| item.free(allocator);
 
     _ = try collect(allocator, opID, &result, &parsed.value);
-    std.log.debug("fetched thread {d} from algolia : got {d} items ", .{ opID, result.items.len });
+    log.info("fetched thread {d} from algolia : got {d} items ", .{ opID, result.items.len });
 
     return try result.toOwnedSlice(allocator);
 }
 
-// /item?id=123
-// /item/discussion?id=123&tid=456
-
 /// Caller must call Item.free() for each item and the free the slice itself
 pub fn fetchLineage(_: *Self, allocator: Allocator, item_id: ItemID) ![]Item {
-    std.log.debug("fetching discussion {d} from HN official API", .{item_id});
+    log.debug("fetching discussion {d} from HN official API", .{item_id});
     var result: std.ArrayList(Item) = .{};
     defer result.deinit(allocator);
     errdefer {
@@ -743,6 +741,7 @@ pub fn fetchLineage(_: *Self, allocator: Allocator, item_id: ItemID) ![]Item {
         item.kids = &.{}; // no need to show replies in this case
     }
 
+    log.info("fetched discussion {d} from HN official API", .{item_id});
     return items;
 }
 
@@ -751,7 +750,7 @@ pub fn fetchLineage(_: *Self, allocator: Allocator, item_id: ItemID) ![]Item {
 /// to fetchThreadAlgolia() since this once makes recursive HTTP requests
 /// for each item.
 pub fn fetchThreadOfficial(self: *Self, allocator: Allocator, opID: ItemID) ![]Item {
-    std.log.debug("fetching thread {d} from HN official API", .{opID});
+    log.debug("fetching thread {d} from HN official API", .{opID});
     var result: std.ArrayList(Item) = .{};
     defer result.deinit(allocator);
     errdefer {
@@ -776,6 +775,7 @@ pub fn fetchThreadOfficial(self: *Self, allocator: Allocator, opID: ItemID) ![]I
         }
     }
 
+    log.info("fetched thread {d} from HN official API", .{opID});
     return result.toOwnedSlice(allocator);
 }
 
@@ -787,12 +787,12 @@ pub fn fetchDiscussion(
     thread_id: ItemID,
     item_id: ItemID,
 ) ![]const Item {
-    std.log.debug("fetching discussion {d}", .{item_id});
-    errdefer std.log.debug("failed to discussion thread {d}", .{item_id});
+    log.debug("fetching discussion {d}", .{item_id});
+    errdefer log.info("failed to discussion thread {d}", .{item_id});
 
     var cached_items = try self.db.readDiscussion(allocator, item_id);
     if (cached_items) |items| {
-        std.log.debug("fetched cached discussion {d}: found {d} items", .{ item_id, items.len });
+        log.info("fetched cached discussion {d}: found {d} items", .{ item_id, items.len });
         return items;
     }
 
@@ -805,7 +805,7 @@ pub fn fetchDiscussion(
     // try again
     cached_items = try self.db.readDiscussion(allocator, item_id);
     if (cached_items) |items| {
-        std.log.debug("fetched cached discussion {d}: found {d} items", .{ item_id, items.len });
+        log.info("fetched cached discussion {d}: found {d} items", .{ item_id, items.len });
         return items;
     }
 
@@ -823,12 +823,12 @@ pub fn fetchThread(
         wg: ?*std.Thread.WaitGroup = null,
     },
 ) ![]const Item {
-    std.log.debug("fetching thread {d}", .{opID});
-    errdefer std.log.debug("failed to fetch thread {d}", .{opID});
+    log.debug("fetching thread {d}", .{opID});
+    errdefer log.info("failed to fetch thread {d}", .{opID});
 
     const cached_items = try self.db.readThread(allocator, opID);
     if (cached_items) |items| {
-        std.log.debug("fetched cached thread {d}: found {d} items", .{ opID, items.len });
+        log.info("fetched cached thread {d}: found {d} items", .{ opID, items.len });
         return items;
     }
 
@@ -858,13 +858,13 @@ pub fn fetchThread(
         }
     }
 
-    std.log.debug("fetched thread {d}: got {d} items", .{ opID, items.len });
+    log.info("fetched thread {d}: got {d} items", .{ opID, items.len });
 
     if (options.wg) |wg| {
         self.thread_pool.spawnWg(wg, struct {
             fn _(hn: *Self, op_id: ItemID, data: []Item) void {
                 hn.db.insertItems(data) catch |err| {
-                    std.log.err("failed to cache thread: {d}: {any}", .{ op_id, err });
+                    log.err("failed to cache thread: {d}: {any}", .{ op_id, err });
                 };
             }
         }._, .{ self, opID, items });
@@ -968,11 +968,11 @@ const DB = struct {
 
         try transaction(conn);
         defer conn.commit() catch {
-            std.log.err("failed to commit insertFeed: {s}", .{conn.lastError()});
+            log.err("failed to commit insertFeed: {s}", .{conn.lastError()});
         };
         errdefer conn.rollback();
 
-        errdefer std.log.err("failed to read item: {s}", .{conn.lastError()});
+        errdefer log.err("failed to read item: {s}", .{conn.lastError()});
 
         const stmt = try conn.prepare(
             \\INSERT INTO hn_feed(feed, num, item_id, inserted) VALUES(?, ?, ?, ?);
@@ -997,7 +997,7 @@ const DB = struct {
         const conn = self.read_pool.acquire();
         defer conn.release();
 
-        errdefer std.log.err("failed to read feed: {s}", .{conn.lastError()});
+        errdefer log.err("failed to read feed: {s}", .{conn.lastError()});
 
         var result: std.ArrayList(ItemID) = .{};
         defer result.deinit(allocator);
@@ -1046,7 +1046,7 @@ const DB = struct {
         const conn = self.read_pool.acquire();
         defer conn.release();
 
-        errdefer std.log.err("failed to read item: {s}", .{conn.lastError()});
+        errdefer log.err("failed to read item: {s}", .{conn.lastError()});
 
         const is_thread_root = blk: {
             const thread_root_row = try conn.row(
@@ -1058,8 +1058,6 @@ const DB = struct {
             };
             break :blk thread_root_row != null;
         };
-
-        std.debug.print("is thread: {d} {any}\n", .{ op_id, is_thread_root });
 
         const query = if (is_thread_root)
             \\SELECT id, username, score, title, url, descendants, time, text,
@@ -1120,7 +1118,7 @@ const DB = struct {
             };
 
             if (now - item.inserted >= expiration_sec) {
-                std.log.debug("thread cached expired: {d}", .{op_id});
+                log.debug("thread cached expired: {d}", .{op_id});
                 for (result.items) |entry| entry.free(allocator);
                 result.deinit(allocator);
                 return null;
@@ -1182,7 +1180,7 @@ const DB = struct {
         const conn = self.read_pool.acquire();
         defer conn.release();
 
-        errdefer std.log.err("failed to read item: {s}", .{conn.lastError()});
+        errdefer log.err("failed to read item: {s}", .{conn.lastError()});
 
         var rows = try conn.rows(
             \\WITH RECURSIVE
@@ -1225,7 +1223,7 @@ const DB = struct {
             };
 
             if (now - item.inserted >= expiration_sec) {
-                std.log.debug("discussion cached expired: {d}", .{item_id});
+                log.debug("discussion cached expired: {d}", .{item_id});
                 for (result.items) |entry| entry.free(allocator);
                 result.deinit(allocator);
                 return null;
@@ -1260,7 +1258,7 @@ const DB = struct {
         const conn = self.read_pool.acquire();
         defer conn.release();
 
-        errdefer std.log.err("failed to read item: {s}", .{conn.lastError()});
+        errdefer log.err("failed to read item: {s}", .{conn.lastError()});
 
         const query = try std.fmt.allocPrint(allocator,
             \\SELECT
@@ -1334,7 +1332,7 @@ const DB = struct {
         const conn = self.read_pool.acquire();
         defer conn.release();
 
-        errdefer std.log.err("failed to read item: {s}", .{conn.lastError()});
+        errdefer log.err("failed to read item: {s}", .{conn.lastError()});
 
         const item_stmt = try conn.row(
             \\SELECT
@@ -1446,7 +1444,7 @@ const DB = struct {
         defer insert_reply_stmt.deinit();
 
         errdefer {
-            std.log.err("failed to insert items: {s}", .{conn.lastError()});
+            log.err("failed to insert items: {s}", .{conn.lastError()});
         }
 
         for (items) |item| {
@@ -1481,7 +1479,7 @@ const DB = struct {
         const conn = self.write_pool.acquire();
         defer conn.release();
         errdefer {
-            std.log.err("failed to create database: {s}", .{conn.lastError()});
+            log.err("failed to create database: {s}", .{conn.lastError()});
         }
 
         try conn.execNoArgs(
@@ -1542,9 +1540,9 @@ const DB = struct {
         const thread = try std.Thread.spawn(.{}, struct {
             fn loop(db: Instance) void {
                 while (true) {
-                    std.log.debug("removing old items", .{});
+                    log.debug("removing old threads", .{});
                     db.removePastLimit() catch |err| {
-                        std.log.err("failed to remove old items: {any}", .{err});
+                        log.err("failed to remove old items: {any}", .{err});
                     };
                     std.Thread.sleep(1e9 * 60 * 60);
                 }
@@ -1557,7 +1555,7 @@ const DB = struct {
     pub fn removePastLimit(self: @This()) !void {
         const conn = self.write_pool.acquire();
         defer conn.release();
-        errdefer std.log.err("{s}", .{conn.lastError()});
+        errdefer log.err("{s}", .{conn.lastError()});
 
         try conn.execNoArgs(
             \\DELETE FROM hn_items
@@ -1572,7 +1570,7 @@ const DB = struct {
             defer row.deinit();
 
             const num_deleted = row.int(0);
-            std.log.debug("deleted {d} threads", .{num_deleted});
+            log.info("deleted {d} old threads", .{num_deleted});
         }
     }
 };
