@@ -14,6 +14,7 @@ const routes = .{
     .@"/" = @import("./pages/index.zig").serve,
     .@"/item" = @import("./pages/item.zig").serveItem,
     .@"/item/discussion" = @import("./pages/item.zig").serveDiscussion,
+    .@"/parse-hn-url" = @import("./pages/parse-hn-url.zig").serve,
 };
 
 const RoutePath = std.meta.FieldEnum(@TypeOf(routes));
@@ -254,6 +255,9 @@ pub fn startServer() !void {
         .port = port,
         .timeout = .{
             .request = 1000,
+        },
+        .request = .{
+            .max_form_count = 12,
         },
     }, .{
         .thread_pool = &tpool,

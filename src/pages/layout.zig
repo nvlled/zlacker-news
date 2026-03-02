@@ -43,10 +43,30 @@ pub fn begin(self: @This(), attrs: Attrs) !void {
 
     z.h1.@"<>"();
 
-    z.a.attr(.href, "/");
-    z.a.attr(.id, "top");
-    z.a.render("zlacker");
+    z.header.attr(.class, "site");
+    z.header.@"<>"();
+    {
+        z.a.attr(.href, "/");
+        z.a.attr(.id, "top");
+        z.a.render("zlacker");
 
+        z.form.attrs(.{
+            .action = "/parse-hn-url",
+            .method = "post",
+            .class = "parse",
+        });
+        z.form.@"<>"();
+        {
+            z.input.attrs(.{
+                .placeholder = "HN URL",
+                .name = "url",
+            });
+            z.input.render();
+            z.button.render("go");
+        }
+        z.form.@"</>"();
+    }
+    z.header.@"</>"();
 
     z.h1.@"</>"();
 }
