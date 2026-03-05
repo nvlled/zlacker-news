@@ -172,6 +172,9 @@ pub fn render(ctx: *RequestContext, data: Data) !void {
             z.a.render("[links]");
         }
 
+        z.a.attr(.href, "#bottom");
+        z.a.render("[bottom]");
+
         if (op.text.len > 0) {
             z.p.@"<>"();
             z.@"writeUnsafe!?"(op.text);
@@ -217,9 +220,15 @@ pub fn render(ctx: *RequestContext, data: Data) !void {
 
     z.div.@"</>"();
 
+    ctx.res.writer().flush() catch {};
+
     const start: usize = if (items[0].parent != null) 0 else 1;
 
     for (items[start..], 0..) |item, n| {
+        if (n + 1 % 50 == 0) {
+            ctx.res.writer().flush() catch {};
+        }
+
         if (data.with_links_only and !try any_link.matches(arena, item.text, .{})) {
             continue;
         }
@@ -349,11 +358,7 @@ pub fn render(ctx: *RequestContext, data: Data) !void {
     z.div.attr(.id, "top-bottom-nav");
     z.div.@"<>"();
     z.a.attrs(.{ .href = "#top" });
-    z.a.render("[go up]");
-    z.br.render();
-    z.br.render();
-    z.a.attrs(.{ .href = "#bottom" });
-    z.a.render("[go down]");
+    z.a.render("^top");
     z.div.@"</>"();
 
     layout.end();

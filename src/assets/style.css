@@ -1,6 +1,9 @@
+:root {
+    --body-width: 800px;
+}
 
 body {
-	max-width: 900px;
+	max-width: var(--body-width);
 	background: #003333;
 	color: #eee;
 	font-family: system-ui;
@@ -102,8 +105,8 @@ a.replink {
 }
 
 #top-bottom-nav {
-    position: fixed;
-    right: 0;
+    position: sticky;
+    padding: 5px;
     bottom: 0;
     text-align: right;
     font-family: monospace;

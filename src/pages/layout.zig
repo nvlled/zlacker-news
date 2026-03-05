@@ -35,7 +35,7 @@ pub fn begin(self: @This(), attrs: Attrs) !void {
         z.link.attr(.href, Assets.link(.@"/assets/style.css"));
         z.link.render();
 
-        z.script.attr(.src, Assets.link(.@"/assets/custom-nav.js"));
+        //z.script.attr(.src, Assets.link(.@"/assets/custom-nav.js"));
         z.script.render("");
     }
     z.head.@"</>"();
