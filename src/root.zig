@@ -7,6 +7,8 @@ const HN = @import("./hn.zig");
 const Zhtml = @import("zhtml");
 const RequestContext = @import("./context.zig");
 
+const build_options = @import("build_options");
+
 const Action = *const fn (*RequestContext) anyerror!void;
 const Render = *const fn (*Zhtml) anyerror!void;
 
@@ -41,7 +43,7 @@ const Handler = struct {
     pub fn handleRoute(app: Handler, req: *httpz.Request, res: *httpz.Response) !void {
         if (std.meta.stringToEnum(RoutePath, req.url.path)) |route_path| {
             try handlePage(app, route_path, req, res);
-            if (@import("builtin").mode == .Debug) {
+            if (comptime PageReloader.enabled()) {
                 try PageReloader.injectReloadScript(res);
             }
 
@@ -52,7 +54,7 @@ const Handler = struct {
             return handleAsset(req, res);
         }
 
-        if (@import("builtin").mode == .Debug) {
+        if (comptime PageReloader.enabled()) {
             if (std.mem.eql(u8, req.url.path, PageReloader.route_path)) {
                 try PageReloader.serveWatchStream(req, res);
             }
@@ -71,7 +73,7 @@ const Handler = struct {
         res.header("Content-Type", "text/html");
         res.writer().writeAll(app.page500) catch {};
 
-        if (@import("builtin").mode == .Debug) {
+        if (comptime PageReloader.enabled()) {
             PageReloader.injectReloadScript(res) catch {};
         }
 
@@ -91,7 +93,7 @@ const Handler = struct {
         res.header("Content-Type", "text/html");
         res.writer().writeAll(app.page404) catch {};
 
-        if (@import("builtin").mode == .Debug) {
+        if (comptime PageReloader.enabled()) {
             try PageReloader.injectReloadScript(res);
         }
     }
@@ -214,7 +216,14 @@ const PageReloader = struct {
     }
 
     pub fn injectReloadScript(res: *httpz.Response) !void {
+        log.info("injecting reload script", .{});
         return res.writer().writeAll(reload_script);
+    }
+
+    pub fn enabled() bool {
+        comptime {
+            return (@import("builtin").mode == .Debug) and build_options.auto_page_reload;
+        }
     }
 };
 
@@ -279,8 +288,6 @@ pub fn startServer() !void {
     unreachable;
 }
 
-const test_output = @import("build_options").test_output;
-
 test "routes:ndex" {
     const allocator = std.testing.allocator;
 
@@ -303,7 +310,7 @@ test "routes:ndex" {
     };
     try @import("./pages/index.zig").serve(&ctx);
     try wt.expectStatus(200);
-    if (test_output)
+    if (build_options.test_output)
         std.info("test output for \"{s}\":\n{s}\n\n", .{ "/", try wt.getBody() });
 }
 
@@ -331,7 +338,7 @@ test "routes:item" {
     q.add("id", "1727731");
     try routes.@"/item"(&ctx);
     try wt.expectStatus(200);
-    if (test_output)
+    if (build_options.test_output)
         std.info("test output for \"{s}\":\n{s}\n\n", .{ "/item", try wt.getBody() });
 }
 
@@ -359,7 +366,7 @@ test "routes:assets" {
 
     try Handler.handleAsset(ctx.req, ctx.res);
     try wt.expectStatus(200);
-    if (test_output)
+    if (build_options.test_output)
         std.info("test output for \"{s}\":\n{s}\n\n", .{
             "/assets/style.css",
             try wt.getBody(),

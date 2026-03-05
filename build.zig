@@ -11,9 +11,12 @@ pub fn build(b: *std.Build) void {
     const test_filters = b.option([]const []const u8, "test-filter", "run only test that matches filter") orelse &[0][]const u8{};
 
     const test_output = b.option(bool, "test-output", "show test output") orelse false;
+    const auto_page_reload = b.option(bool, "auto-page-reload", "auto page reload") orelse false;
 
     const options = b.addOptions();
+
     options.addOption(bool, "test_output", test_output);
+    options.addOption(bool, "auto_page_reload", auto_page_reload);
 
     // Standard target options allow the person running `zig build` to choose
     // what target to build for. Here we do not override the defaults, which
