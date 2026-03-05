@@ -1,49 +1,22 @@
-console.log("test");
+let popover = null;
+let highlighted = null;
 
+window.onkeydown = e => {
+    if (e.keyCode == 27) { // escape key
+        popover?.remove();
+        popover = null;
+    }
+};
 function initItemLinks(item) {
     for (const link of item.querySelectorAll(".replink")) {
         const end = document.createElement("span");
+
+        link.title = ""; // remove native popover title
         link.appendChild(end);
 
-        let popover = null;
-        let pinned = false;
-        let mouseDownStart = null;
-        let clickTimer = null;
-
-        link.onmousedown = (e) => {
-            mouseDownStart = Date.now();
-            setTimeout(() => {
-                if (popover) {
-                    popover.classList.add("pinned");
-                    pinned = true;
-
-                    const close = document.createElement("button");
-                    close.textContent = "X";
-                    close.onclick = () => {
-                        popover.remove();
-                        popover = null;
-                        pinned = false;
-            }
-
-            popover.querySelector(".header")?.appendChild(close);
-                }
-            }, 256);
-        }
-        link.onclick = (e) => {
-            clearTimeout(clickTimer);
-            if (mouseDownStart) {
-                const duration = Date.now() - mouseDownStart;
-                if (duration >= 256) {
-                    e.preventDefault();
-                    return;
-                }
-            }
-        }
-
         link.onpointerover = () => {
-            if (popover) {
-                return;
-            }
+            popover?.remove();
+            highlighted?.classList?.remove("highlighted");
 
             const m = link.href.match(/#(.*)$/)
             if (!m) return;
@@ -52,30 +25,54 @@ function initItemLinks(item) {
             const target = document.getElementById(id);
             if (!target) return;
 
+            highlighted = target;
+
             popover = target.cloneNode(true);
             popover.classList.add("popover");
-            {
-                const r = link.getBoundingClientRect();
-                popover.style.position = "absolute";
-                popover.style.top = Math.floor(r.bottom + scrollY) +"px";
-                if (r.right < window.innerWidth/2)
-                    popover.style.left =  Math.floor(r.left) + "px";
-                else
-                    popover.style.right =  Math.ceil(innerWidth - r.right) + "px";
+
+            target.classList.add("highlighted");
+
+            const t_rect = target.getBoundingClientRect();
+            if (t_rect.top > 0 && t_rect.bottom < innerHeight) {
+                return;
             }
 
-            link.title = "Click and hold to pin"; // remove native popover title
+            // Note: popover must be attached to the node tree before
+            // the bounding rect can be computed.
+            document.body.appendChild(popover);
+
+            const link_rect = link.getBoundingClientRect();
+            const screen_offset = link_rect.top/window.innerHeight;
+
+            popover.style.position = "absolute";
+
+            if (link_rect.right < window.innerWidth/2)
+                popover.style.left =  Math.floor(link_rect.left) + "px";
+            else
+                popover.style.right =  Math.ceil(innerWidth - link_rect.right) + "px";
+
+            // Note: popover left or right position must be computed first
+            // before getting the bounding rect. This is because the node's
+            // bounding rect will be adjust if the node is too large too fit
+            // in the screen given the right or left position.
+            const p_rect = popover.getBoundingClientRect();
+
+            if (screen_offset < 0.5) 
+                popover.style.top = Math.floor(link_rect.bottom + scrollY) +"px";
+            else
+                popover.style.top = Math.floor(link_rect.top + -p_rect.height + scrollY) +"px";
+
+
             popover.querySelector(".reply-links")?.remove();
 
-            document.body.appendChild(popover);
         };
 
         link.onmouseout = () => {
-            if (popover && !pinned) {
-                popover.remove();
-                popover = null;
-                pinned = false;
-            }
+            highlighted?.classList?.remove("highlighted");
+            highlighted = null;
+
+            popover?.remove();
+            popover = null;
         };
     }
 }

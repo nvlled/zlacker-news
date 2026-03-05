@@ -85,6 +85,10 @@ a.replink {
 		color: #007744;
 	}
 
+    &.highlighted {
+        outline: 2px solid red;
+    }
+
     &.popover.pinned {
         border: 1px solid #0cc;
     }
