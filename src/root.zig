@@ -306,6 +306,8 @@ pub fn startServer() !void {
     var buf: [128]u8 = @splat(0);
     var stdin = std.fs.File.stdin().reader(&buf);
     var r = &stdin.interface;
+
+    var stop = false;
     while (true) {
         std.debug.print("> ", .{});
         var line: []const u8 = try r.takeDelimiter('\n') orelse break;
@@ -313,9 +315,16 @@ pub fn startServer() !void {
         if (std.mem.eql(u8, line, "quit") or
             std.mem.eql(u8, line, "q") or
             std.mem.eql(u8, line, "exit"))
-            break
-        else
+        {
+            stop = true;
+            break;
+        } else {
             std.debug.print("unknown command: {s}\n", .{line});
+        }
+    }
+
+    if (!stop) {
+        thread.join();
     }
 }
 
