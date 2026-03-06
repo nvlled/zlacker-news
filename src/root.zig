@@ -1,5 +1,6 @@
 const std = @import("std");
 const httpz = @import("httpz");
+const builtin = @import("builtin");
 
 const Assets = @import("./assets.zig");
 const Ext2mime = @import("./ext2mime.zig");
@@ -109,6 +110,7 @@ const Handler = struct {
             if (zhtml.getErrorTrace()) |trace| std.debug.print("{s}\n", .{trace});
             zhtml.deinit(res.arena);
         }
+
         defer res.writer().flush() catch {};
 
         var ctx = RequestContext{
@@ -222,13 +224,25 @@ const PageReloader = struct {
 
     pub fn enabled() bool {
         comptime {
-            return (@import("builtin").mode == .Debug) and build_options.auto_page_reload;
+            return (builtin.mode == .Debug) and build_options.auto_page_reload;
         }
     }
 };
 
 pub fn startServer() !void {
-    const allocator = std.heap.smp_allocator;
+    var gpa: std.heap.DebugAllocator(.{}) = .init;
+    const allocator = if (builtin.mode == .Debug)
+        gpa.allocator()
+    else
+        std.heap.smp_allocator;
+
+    defer if (builtin.mode == .Debug) {
+        std.debug.print("checking for leaks\n", .{});
+        const status = gpa.deinit();
+        if (status == .leak) {
+            @panic("noooouuuu");
+        }
+    };
 
     var hn: HN = try .init(allocator);
     defer hn.deinit(allocator);
@@ -254,6 +268,7 @@ pub fn startServer() !void {
         inline for (.{ .{ "404.html", page404 }, .{ "500.html", page500 } }) |item| {
             const filename, const contents = item;
             const dest_path = try std.fs.path.join(allocator, &.{ exe_path, filename });
+            defer allocator.free(dest_path);
             var file = try std.fs.cwd().createFile(dest_path, .{});
             defer file.close();
             try file.writeAll(contents);
@@ -277,15 +292,31 @@ pub fn startServer() !void {
         .page404 = page404,
         .page500 = page500,
     });
+
+    const thread = try server.listenInNewThread();
     defer {
         server.stop();
+        thread.join();
         server.deinit();
     }
 
     log.info("server running at localhost:{d}\n", .{port});
-    try server.listen();
+    std.debug.print("type `q` or `quit` to stop the server\n", .{});
 
-    unreachable;
+    var buf: [128]u8 = @splat(0);
+    var stdin = std.fs.File.stdin().reader(&buf);
+    var r = &stdin.interface;
+    while (true) {
+        std.debug.print("> ", .{});
+        var line: []const u8 = try r.takeDelimiter('\n') orelse break;
+        line = std.mem.trim(u8, line, &.{' '});
+        if (std.mem.eql(u8, line, "quit") or
+            std.mem.eql(u8, line, "q") or
+            std.mem.eql(u8, line, "exit"))
+            break
+        else
+            std.debug.print("unknown command: {s}\n", .{line});
+    }
 }
 
 test "routes:ndex" {
