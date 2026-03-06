@@ -30,14 +30,16 @@ fetcher: *Fetcher,
 
 const Fetcher = struct {
     multi: curl.Multi,
+    diagnostics: *curl.Multi.Diagnostics,
     ca_bundle: std.array_list.Managed(u8),
+    allocator: Allocator,
 
     blocker: std.Thread.ResetEvent = .{},
-    result: std.AutoHashMapUnmanaged(*anyopaque, *Job.Shared) = .{},
     running: std.atomic.Value(bool) = .init(false),
     running_wg: std.Thread.WaitGroup = .{},
+    result: std.AutoHashMapUnmanaged(*anyopaque, *Job.Data) = .{},
 
-    queue: std.ArrayList(QueueItem) = .{},
+    queue: std.ArrayList(*Job.Data) = .{},
     queue_mu: std.Thread.Mutex = .{},
 
     const QueueItem = struct {
@@ -46,13 +48,13 @@ const Fetcher = struct {
     };
 
     const Job = struct {
-        easy: curl.Easy,
         buf: *std.Io.Writer.Allocating,
-        shared: *Shared,
+        data: *Data,
 
         owns_wg: bool,
 
-        const Shared = struct {
+        const Data = struct {
+            easy: curl.Easy,
             wg: *std.Thread.WaitGroup,
             failed: bool,
         };
@@ -64,41 +66,46 @@ const Fetcher = struct {
                 break :blk w;
             };
 
-            const shared = try allocator.create(Shared);
+            const shared = try allocator.create(Data);
             shared.* = .{
                 .wg = wg,
                 .failed = false,
+                .easy = try .init(.{}),
             };
 
             const buf = try allocator.create(std.Io.Writer.Allocating);
             buf.* = .init(allocator);
 
             return .{
-                .easy = try .init(.{}),
                 .buf = buf,
                 .owns_wg = wg_arg == null,
-                .shared = shared,
+                .data = shared,
             };
         }
 
         pub fn deinit(self: @This(), allocator: Allocator) void {
-            if (self.owns_wg) allocator.destroy(self.shared.wg);
-            self.easy.deinit();
+            if (self.owns_wg) allocator.destroy(self.data.wg);
             self.buf.deinit();
 
-            allocator.destroy(self.shared);
+            var easy: *curl.Easy = @constCast(&self.data.easy);
+            easy.deinit();
+
+            allocator.destroy(self.data);
             allocator.destroy(self.buf);
         }
 
         pub fn getResponse(self: @This()) !curl.Easy.Response {
-            const easy_handle = self.easy.handle;
+            const easy_handle = self.data.easy.handle;
             var status_code: c_long = 0;
 
-            try curl.checkCode(curl.libcurl.curl_easy_getinfo(
-                easy_handle,
-                curl.libcurl.CURLINFO_RESPONSE_CODE,
-                &status_code,
-            ));
+            try curl.checkCode(
+                curl.libcurl.curl_easy_getinfo(
+                    easy_handle,
+                    curl.libcurl.CURLINFO_RESPONSE_CODE,
+                    &status_code,
+                ),
+                null,
+            );
 
             return .{
                 .handle = easy_handle,
@@ -108,16 +115,33 @@ const Fetcher = struct {
 
         pub fn wait(self: @This()) void {
             if (self.owns_wg)
-                self.shared.wg.wait();
+                self.data.wg.wait();
         }
 
         pub fn waitOutput(self: @This()) ![]const u8 {
-            if (self.owns_wg) self.shared.wg.wait();
-            if (self.shared.failed) return Error.FetchError;
+            if (self.owns_wg) self.data.wg.wait();
+            if (self.data.failed) return Error.FetchError;
+
+            const resp = try self.getResponse();
+            if (resp.status_code != 200) {
+                return Error.FetchError;
+            }
 
             return self.buf.toOwnedSlice();
         }
     };
+
+    pub fn init(allocator: Allocator) !Fetcher {
+        const diagnostics = try allocator.create(curl.Multi.Diagnostics);
+        diagnostics.* = .{};
+
+        return .{
+            .allocator = allocator,
+            .multi = try .init(diagnostics),
+            .ca_bundle = try curl.allocCABundle(allocator),
+            .diagnostics = diagnostics,
+        };
+    }
 
     fn deinit(self: *@This(), allocator: Allocator) void {
         if (self.running.load(.monotonic)) {
@@ -125,10 +149,17 @@ const Fetcher = struct {
             self.running_wg.wait();
         }
 
-        self.result.deinit(allocator);
         self.multi.deinit();
         self.ca_bundle.deinit();
-        self.queue.deinit(allocator);
+        self.result.deinit(allocator);
+
+        {
+            self.queue_mu.lock();
+            defer self.queue_mu.unlock();
+            self.queue.deinit(allocator);
+        }
+
+        allocator.destroy(self.diagnostics);
     }
 
     fn stop(self: *@This()) void {
@@ -152,17 +183,31 @@ const Fetcher = struct {
         }
 
         var skips: usize = 0;
-        var abort = false;
 
         while (self.running.load(.unordered)) {
+            defer if (skips > 1e6) {
+                curl_log.info("infinite loop detected, something's probably broken", .{});
+                std.Thread.sleep(5e8);
+                skips = 0;
+            };
+
             if (self.queue.items.len > 0) {
                 self.queue_mu.lock();
                 defer self.queue_mu.unlock();
 
-                var limit: usize = 32;
+                var limit: usize = 16;
                 while (self.queue.pop()) |item| {
-                    self.multi.addHandle(item.easy) catch |err| {
+                    self.result.put(self.allocator, item.easy.handle, item) catch |err| {
+                        curl_log.err("failed to add to result hashmap: {any} ", .{err});
+                        item.failed = true;
+                        item.wg.finish();
+                        continue;
+                    };
+
+                    self.multi.addHandle(@constCast(&item.easy)) catch |err| {
                         curl_log.err("failed to add handle: {any}", .{err});
+                        item.failed = true;
+                        item.wg.finish();
                         _ = self.result.remove(item.easy.handle);
                         continue;
                     };
@@ -181,7 +226,7 @@ const Fetcher = struct {
             };
 
             if (count > 0) {
-                const changed = self.multi.poll(null, 5000) catch |err| {
+                const changed = self.multi.poll(null, 300) catch |err| {
                     curl_log.err("failed to poll : {any}", .{err});
                     skips += 1;
                     continue;
@@ -194,12 +239,9 @@ const Fetcher = struct {
 
             const info = self.multi.readInfo() catch |err| switch (err) {
                 error.InfoReadExhausted => {
-                    if (count == 0) {
-                        self.blocker.timedWait(2e9) catch {};
+                    if (self.result.size == 0) {
+                        self.blocker.timedWait(60e9) catch {};
                         self.blocker.reset();
-                    } else {
-                        curl_log.debug("no info read, continuing", .{});
-                        skips += 1;
                     }
                     continue;
                 },
@@ -208,18 +250,6 @@ const Fetcher = struct {
             if (info.msg.msg != curl.libcurl.CURLMSG_DONE) {
                 curl_log.debug("message not yet done, continuing", .{});
                 skips += 1;
-                continue;
-            }
-
-            if (abort) {
-                @panic("curl is not working as expected");
-            }
-
-            if (skips > 1e6) {
-                curl_log.info("infinite loop detected, something's probably broken", .{});
-                std.Thread.sleep(5e8);
-                // try again one more try
-                abort = true;
                 continue;
             }
 
@@ -234,26 +264,29 @@ const Fetcher = struct {
                     curl.libcurl.CURLINFO_RESPONSE_CODE,
                     &status_code,
                 ),
+                self.diagnostics,
             ) catch |err| {
                 curl_log.err("failed to checkCode: {any}", .{err});
             };
 
             {
-                self.queue_mu.lock();
-                defer self.queue_mu.unlock();
-
                 self.multi.removeHandle(easy_handle) catch |err| {
                     curl_log.err("failed to remove handle: {any}", .{err});
                 };
             }
 
             if (self.result.get(easy_handle)) |item| {
-                item.wg.finish();
-                _ = curl.checkCode(info.msg.data.result) catch |err| {
+                _ = curl.checkCode(info.msg.data.result, self.diagnostics) catch |err| {
                     curl_log.err("request failed: {any}\n", .{err});
+                    if (self.diagnostics.error_code) |err_code| {
+                        curl_log.err("diagnostics: {any}", .{err_code});
+                    }
                     item.failed = true;
                 };
+
                 _ = self.result.remove(easy_handle);
+
+                item.wg.finish();
             }
         }
     }
@@ -271,31 +304,25 @@ const Fetcher = struct {
         }
 
         var job: Fetcher.Job = try .init(allocator, args.wg);
-        job.easy.ca_bundle = self.ca_bundle;
+        job.data.easy.ca_bundle = self.ca_bundle;
 
-        job.shared.wg.start();
-        errdefer job.shared.wg.finish();
+        job.data.wg.start();
+        errdefer job.data.wg.finish();
 
-        try job.easy.setUrl(args.url);
-        try job.easy.setMethod(args.method);
-        try job.easy.setWriter(&job.buf.writer);
+        try job.data.easy.setUrl(args.url);
+        try job.data.easy.setMethod(args.method);
+        try job.data.easy.setWriter(&job.buf.writer);
 
         if (args.headers) |headers|
-            try job.easy.setHeaders(headers);
+            try job.data.easy.setHeaders(headers);
         if (args.body) |body|
-            try job.easy.setPostFields(body);
+            try job.data.easy.setPostFields(body);
 
         {
             self.queue_mu.lock();
             defer self.queue_mu.unlock();
 
-            try self.result.put(allocator, job.easy.handle, job.shared);
-            errdefer _ = self.result.remove(job.easy.handle);
-
-            try self.queue.append(allocator, .{
-                .easy = job.easy,
-                .wg = job.shared.wg,
-            });
+            try self.queue.append(allocator, job.data);
         }
 
         self.multi.wakeup() catch {};
@@ -420,11 +447,9 @@ pub fn init(allocator: Allocator) !Self {
 
     try db.createDatabase();
 
-    const fetcher = try allocator.create(Fetcher);
-    fetcher.* = .{
-        .multi = try .init(),
-        .ca_bundle = try curl.allocCABundle(allocator),
-    };
+    var fetcher: *Fetcher = try allocator.create(Fetcher);
+    fetcher.* = try .init(allocator);
+
     try fetcher.startBackground();
 
     return .{
@@ -461,7 +486,7 @@ pub fn fetch(self: *Self, allocator: Allocator, url: [:0]const u8) ![]const u8 {
     defer job.deinit(allocator);
 
     job.wait();
-    if (job.shared.failed) return Error.FetchError;
+    if (job.data.failed) return Error.FetchError;
 
     return try job.buf.toOwnedSlice();
 }
@@ -1765,4 +1790,42 @@ fn percentEncode(w: *std.Io.Writer, str: []const u8) !void {
         else
             try w.writeByte(ch);
     }
+}
+
+test "curl-thread-safety" {
+    const allocator = std.testing.allocator;
+    var fetcher: Fetcher = try .init(allocator);
+    defer fetcher.deinit(allocator);
+
+    try fetcher.startBackground();
+
+    var wg: std.Thread.WaitGroup = .{};
+    var tpool: std.Thread.Pool = undefined;
+    try tpool.init(.{
+        .allocator = allocator,
+        .n_jobs = 10000,
+    });
+    defer tpool.deinit();
+
+    for (0..100) |_| {
+        tpool.spawnWg(&wg, struct {
+            fn _(f: *Fetcher, alloc: Allocator) void {
+                const job = f.submit(alloc, .{
+                    .url = "http://localhost/test.php",
+                }) catch |err| {
+                    std.log.err("failed to submit: {any}", .{err});
+                    return;
+                };
+                defer job.deinit(alloc);
+                const output = job.waitOutput() catch {
+                    std.debug.print("job failed\n", .{});
+                    return;
+                };
+                std.debug.print("job complete: {any} {s}\n", .{ job.data.failed, output });
+                alloc.free(output);
+            }
+        }._, .{ &fetcher, allocator });
+    }
+
+    wg.wait();
 }
